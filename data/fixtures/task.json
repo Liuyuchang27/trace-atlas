@@ -1,0 +1,8 @@
+{
+  "task_id": "synthetic-aurora-birch-asof",
+  "event": "Aurora Birch acquisition",
+  "question": "As of 10 June 2026, what is known about whether Aurora has completed its acquisition of Birch?",
+  "mode": "as_of",
+  "cutoff": "2026-06-10T23:59:59+00:00",
+  "synthetic": true
+}
