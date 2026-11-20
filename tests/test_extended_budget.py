@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from test_adaptive import fixture
+from test_adaptive import fixture, gap, search
 from test_adaptive_http import http_scenario
 
 from news_agent.budget import Budget, BudgetExceeded
@@ -53,7 +53,7 @@ def test_larger_model_allowance_still_stops_at_64_requests(tmp_path):
     assert b.state["tokens"] == 640
 
 
-def test_no_progress_warning_survives_restart_without_forced_cutoff(tmp_path):
+def test_no_progress_warning_survives_restart_then_writes_when_idle(tmp_path):
     _, b, _, a = fixture(tmp_path)
     b.config = config()
     check_progress(a, b)
@@ -67,6 +67,30 @@ def test_no_progress_warning_survives_restart_without_forced_cutoff(tmp_path):
     assert b.state["stop_reason"] is None
     assert "extended_no_progress_warning" in (b.store.root / "trajectory.jsonl").read_text()
     assert b.state["model_calls"] == 0
+    for _ in range(6):
+        check_progress(a, b)
+    assert b.state["phase"] == "writing"
+    assert b.state["stop_reason"] == "adaptive_no_progress"
+
+
+def test_no_progress_defers_only_the_active_gap_then_allows_other_work(tmp_path):
+    from news_agent.gap_replan import apply_replan, pending_replan
+
+    _, b, _, a = fixture(tmp_path)
+    b.config = config()
+    first = gap(a)
+    other = gap(a, "question_or_explanation_unresolved")
+    search(a, first)
+    for _ in range(13):
+        check_progress(a, b)
+    assert a.active() is None
+    assert pending_replan(a)["gap_id"] == first
+    apply_replan(a, first, "continue_other", "Try the other unresolved part", [])
+    assert a.data["gaps"][first]["status"] == "stalled"
+    assert a.data["gaps"][other]["status"] == "open"
+    assert b.state["phase"] == "research"
+    search(a, other, query="separate evidence for the other gap")
+    assert a.active()["gap_id"] == other
 
 
 def test_new_evidence_resets_only_stagnation_not_cumulative_budget(tmp_path):
