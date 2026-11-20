@@ -31,6 +31,12 @@ The workbench exposes the **调查过程** view for observing and replaying acti
 
 The staged profile uses DeepSeek Flash and DeepSeek V4 Pro and enables high reasoning for the isolated date and report reviews. Transient DeepSeek request failures can retry up to three times, with delays of 12, 16, and 20 seconds. Request counts and token limits apply to the shared run budget. You can inspect the retry in the workbench.
 
+## Recent improvements
+
+- For recent-fact questions, the agent checks the publisher and its disclosures. For sales questions it can look back to the previous reporting period and read the new candidates. The report leads with the available data, labels third-party preorder estimates, and states the investigation cutoff and unresolved questions.
+- For monthly trends, the agent tracks each requested month separately and can switch to a historical table when a summary page leaves gaps. The report links the original passages behind the trend chart.
+- The investigation can replan an evidence gap, try a different source or date range, and continue with other questions when one gap stalls. The report export preserves citations to saved passages.
+
 ## Command line and tests
 
 Run the synthetic sample directly:

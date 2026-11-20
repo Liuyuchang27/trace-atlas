@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import calendar
 import hashlib
 import json
 import re
@@ -11,7 +10,7 @@ from typing import Literal
 from pydantic import Field
 
 from .answer_contract import dates
-from .event_graph import Finding, TimeSpan
+from .event_graph import Finding, TimeSpan, month_in_original
 from .schemas import StrictModel
 from .source_access import historical_note, render_inventory
 from .source_context import publication_mentions, source_records
@@ -81,12 +80,7 @@ def _span_supported(span, text):
         return {v for v in [span.start, span.end] if v} <= {d[0] for d in dates(text)}
     if span.precision == "year":
         return span.start in _years(text)
-    y, m = map(int, span.start.split("-"))
-    return (
-        span.start in text
-        or any(d[0].startswith(span.start) for d in dates(text))
-        or bool(re.search(rf"{y}年0?{m}月|\b{calendar.month_name[m]}\s+{y}\b", text, re.I))
-    )
+    return month_in_original(span.start, text)
 
 
 def precision_issue(finding, evidence=None):
@@ -199,6 +193,7 @@ def choices(evidence, packet):
                     "passage_ids": list(dict.fromkeys(r.passage_id for r in f.originals)),
                     "uncertainty": f.uncertainty,
                     **({"question_part_id": f.question_part_id} if f.question_part_id else {}),
+                    **({"monthly_value": f.monthly_value} if f.monthly_value is not None else {}),
                     "required": node["importance"] == "major"
                     and f.occurrence in {"observed", "planned", "statement"}
                     and f.stance in {"supports", "contradicts"},
@@ -216,7 +211,19 @@ def choices(evidence, packet):
         else:
             excluded.append({"finding_id": row["finding_id"], "reason": "report_choice_limit"})
     gaps = [
-        {k: g[k] for k in ["gap_id", "node_id", "kind", "status", "importance"]}
+        {
+            k: g[k]
+            for k in (
+                "gap_id",
+                "node_id",
+                "kind",
+                "status",
+                "importance",
+                "question_part_id",
+                "reference_month",
+            )
+            if k in g
+        }
         for g in evidence.adaptive.data["gaps"].values()
         if g["status"] != "resolved"
     ]
@@ -635,6 +642,15 @@ def render(selection, task, evidence, plan, *, safe=False):
     for gid in gaps:
         gap = gap_map[gid]
         node = evidence.event_graph.data["nodes"].get(gap["node_id"], {})
+        if period := gap.get("reference_month"):
+            lines.append(f"- {period} 的月度数据仍需补证。")
+            continue
+        if part_id := gap.get("question_part_id"):
+            question = next(
+                p["question"] for p in node["question_parts"] if p["part_id"] == part_id
+            )
+            lines.append(f"- {question} 仍需补证。")
+            continue
         lines.append(f"- {node.get('title', task.event)}：{names.get(gap['kind'], gap['kind'])}。")
         if gap["kind"] == "question_or_explanation_unresolved" and node:
             for part in evidence.event_graph.node_view(gap["node_id"]).get("part_status", []):

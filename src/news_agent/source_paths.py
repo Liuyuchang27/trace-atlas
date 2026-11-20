@@ -15,10 +15,12 @@ from .evidence_chain import rank_passages
 from .retrieval import public_url
 
 
-def discover_links(evidence, budget, version_id, query, limit=4):
+def discover_links(evidence, budget, version_id, query, limit=4, *, anchor_matches=None):
     doc = evidence.documents[version_id]
     rows = []
     for match in re.finditer(r"\[([^\]\n]{1,300})\]\(([^\s)]+)\)", doc.content):
+        if anchor_matches and not anchor_matches(match[1]):
+            continue
         try:
             url = public_url(urljoin(doc.url, match[2]))
         except ValueError:

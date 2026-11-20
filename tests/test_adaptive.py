@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import pytest
+from question_parts_fixture import bind, prepared
 from test_event_graph import finding, original, record, setup
 
 from news_agent.adaptive import AdaptiveInvestigation
@@ -67,6 +68,81 @@ def search(
             {},
         )
     )
+
+
+def test_reopening_same_delivered_url_is_blocked_across_rounds(tmp_path):
+    _, _, _, a = fixture(tmp_path)
+    search(a, gap(a))
+    call = {
+        "id": "original-open",
+        "name": "open_url",
+        "args": {"url": "https://issuer.example/release", "focus": " Latest statistics "},
+    }
+    assert a.before_tool(call) is None
+    a.after_tool(call, json.dumps({"passages": [{"passage_id": "saved"}]}))
+    a.close_round("End the first lookup")
+    search(a, gap(a, "question_or_explanation_unresolved"), "different query")
+    repeat = {
+        **call,
+        "id": "same-focus",
+        "args": {**call["args"], "focus": "latest STATISTICS", "passage_limit": 8},
+    }
+    assert "already delivered" in a.before_tool(repeat)
+    assert not a.active()["actions"]
+    repeat["args"]["focus"] = "earlier benchmark"
+    assert a.before_tool(repeat) is None
+
+
+def test_targeted_range_stays_active_after_another_part_is_bound(tmp_path):
+    _, evidence, budget, graph = prepared(tmp_path)
+    a = evidence.adaptive
+    queries = []
+
+    class RetrievedCandidates:
+        async def ainvoke(self, args, config):
+            queries.append(args)
+            return json.dumps({"results": [{"version_id": "history"}]})
+
+    a.search = RetrievedCandidates()
+    gid = gap(a, "question_or_explanation_unresolved", node="q")
+    tool = next(t for t in a.tools() if t.name == "search_gap")
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {
+                    "gap_id": gid,
+                    "question_part_id": "orbit",
+                    "query": "orbit records May through October",
+                    "strategy": "primary_record",
+                    "window": {"precision": "range", "start": "2026-05", "end": "2026-10"},
+                    "movement": "initial",
+                    "reason": "Read records for the unresolved orbit part",
+                }
+            )
+        )
+    )
+    assert result["question_part_id"] == "orbit"
+    assert queries[0]["query"].endswith("[event date focus: 2026-05-01 to 2026-10-31]")
+
+    launch = original(evidence, budget, "latest", "The probe launched on Oct. 2026.")
+    bind(graph, launch, "launch", "observed", "The probe launched.")
+    a.active()["local_no_gain"] = 2
+    lookup = {
+        "id": "read-trend",
+        "name": "find_saved_text",
+        "args": {"version_id": "history", "query": "orbit reference period"},
+    }
+    assert a.before_tool(lookup) is None
+    a.prompt()
+    assert a.active()["question_part_id"] == "orbit"
+    assert a.measure(a.data["gaps"][gid], "orbit")["findings"] == []
+
+    orbit = original(evidence, budget, "history", "The probe entered orbit.")
+    a.after_tool(lookup, json.dumps({"passages": [{"passage_id": orbit.passage_id}]}))
+    bind(graph, orbit, "orbit", "observed", "The probe entered orbit.")
+    a.prompt()
+    assert a.active() is None
+    assert a.data["rounds"][-1]["retrieval_evidence_gain"]
 
 
 def test_two_supplements_update_same_node_and_derive_resolution(tmp_path):

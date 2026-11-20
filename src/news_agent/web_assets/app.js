@@ -100,7 +100,19 @@ function render() {
     ? effortNames[lastRoute.reasoning_effort] || "思考模式" : "普通模式";
   const modelLabel = data.mock ? "合成事件 · 脚本模型工程验收" : lastRoute ? `${stageNames[lastRoute.stage] || lastRoute.stage} · ${lastRoute.model.replace("deepseek:", "")} · ${thinkingLabel}` : (data.model || "正在连接模型");
   $("#run-subtitle").textContent = `${modelLabel} / ${data.run_id} / ${data.task.mode || "retrospective"}`;
-  const notice = data.mock ? "此运行使用合成资料和脚本模拟模型，只验证工程流程，不是对真实问题的回答。" : data.status === "partial" ? `调查部分完成：${({research_budget_exhausted:"已为写作保留预算，仍有待补证问题",answer_binding_unavailable:"原文尚未形成有效结论绑定",adaptive_gaps_resolved_or_stalled:"本轮调查已收尾，请查看仍开放的缺口",source_only_report_after_draft_connection_failure:"报告初稿遇到连接错误，已用保存的原文完成复核并生成证据报告"})[data.stop_reason] || "本轮已停止，部分问题仍需核查"}。已有成果和缺口均已保留。` : data.status === "failed" || data.status === "interrupted" ? `${providerError(data.stop_reason) || "本次运行未正常完成"}。可检查节点结果和已保存证据。` : "";
+  const partialReasons = {
+    cancelled_by_user: "本次调查已手动停止",
+    research_budget_exhausted: "已为写作保留预算，仍有待补证问题",
+    answer_binding_unavailable: "原文尚未形成有效结论绑定",
+    repeated_unavailable_tool: "本轮因连续调用不可用工具而提前收尾，仍有分项未查完",
+    adaptive_gaps_resolved_or_stalled: "本轮调查已收尾，请查看仍开放的缺口",
+    adaptive_no_progress: "连续操作未获得新证据，已用现有证据收尾",
+    current_check_incomplete: "已结束最新消息核查，现有一手证据不足以确认结果",
+    source_only_report_after_draft_connection_failure: "报告初稿遇到连接错误，已用保存的原文完成复核并生成证据报告",
+  };
+  const noticeReason = data.stop_reason === "answer_binding_unavailable" && b.stop_reason === "adaptive_no_progress" ? b.stop_reason : data.stop_reason;
+  const currentConclusionInReport = data.report_brief?.current && ["current_fact_checked", "current_check_incomplete"].includes(noticeReason);
+  const notice = data.mock ? "此运行使用合成资料和脚本模拟模型，只验证工程流程，不是对真实问题的回答。" : data.status === "partial" && !currentConclusionInReport ? `调查部分完成：${partialReasons[noticeReason] || "本轮已停止，部分问题仍需核查"}。已有成果和缺口均已保留。` : data.status === "failed" || data.status === "interrupted" ? `${providerError(data.stop_reason) || "本次运行未正常完成"}。可检查节点结果和已保存证据。` : "";
   $("#notice").textContent = notice; $("#notice").hidden = !notice;
   $("#metrics").innerHTML = metric("模型请求", num(b.model_calls), modelLimit == null ? "无累计上限" : `上限 ${num(modelLimit)}`, modelLimit == null ? null : (b.model_calls || 0)/modelLimit, "包含核验与报告修订")
     + metric("Token 消耗", num(b.tokens), tokenLimit == null ? "无累计上限" : `/ ${num(tokenLimit)}`, tokenLimit == null ? null : (b.tokens || 0)/tokenLimit, `${b.unknown_usage_calls || 0} 次未知用量预留`)
@@ -222,6 +234,15 @@ function renderTimeline() {
   $("#timeline-panel").innerHTML = `<div class="section-heading"><div><h2>把事件放回时间里</h2><p>${esc(data.timeline_notice)}</p></div><span class="small-label">${dated.length} 个日期节点 · ${pending.length} 条待确认或待复核</span></div><div class="timeline-list">${cards(dated) || '<p>尚未形成带日期依据的时间节点。</p>'}</div>${pending.length ? `<details><summary>日期待确认与待复核的相关证据</summary><p>保留原文，暂不放入有序时间线。</p><div class="timeline-list">${cards(pending)}</div></details>` : ""}`;
 }
 function renderReport() {
+  if (data.report_brief_html) {
+    const panel = $("#report-panel");
+    const signature = data.run_id + ":" + data.last_sequence;
+    if (panel.dataset.briefRun === signature) return;
+    panel.dataset.briefRun = signature;
+    panel.innerHTML = data.report_brief_html;
+    return;
+  }
+  delete $("#report-panel").dataset.briefRun;
   const counts = new Map();
   for (const source of data.sources) {let host="未知域名"; try{host = new URL(source.url).hostname.replace(/^www\./,"");}catch{} counts.set(host,(counts.get(host)||0)+1);}
   const bars = [...counts].map(([host,count])=>`<div class="source-bar"><span>${esc(host)}<b>${count}</b></span><div class="microbar"><i style="width:${100*count/Math.max(1,data.sources.length)}%"></i></div></div>`).join("");
@@ -289,7 +310,7 @@ $("#play-replay").addEventListener("click",()=>{
 $("#fit-graph").addEventListener("click",()=>{renderGraph();$("#graph-viewport").scrollTo({top:0,left:0,behavior:"smooth"});});
 $("#export-report").addEventListener("click",()=>{if(selectedRun)location.assign(`/api/runs/${encodeURIComponent(selectedRun)}/report.html`);});
 $("#cancel-run").addEventListener("click",async()=>{try{await api(`/api/runs/${encodeURIComponent(selectedRun)}/cancel`,{method:"POST",body:"{}"});toast("已请求停止，将保留已读取证据、用量与部分报告。");}catch(e){toast(e.message);}});
-document.addEventListener("click",e=>{const f=e.target.closest("[data-finding]");if(f){setTab("events");inspectFinding(f.dataset.finding);}const a=e.target.closest("[data-action]");if(a){setTab("graph");replayValue=null;renderGraph();inspectNode("tool:"+a.dataset.action);}const all=e.target.closest("[data-expand-minor]");if(all){$("#events-panel").classList.toggle("show-minor");all.setAttribute("aria-expanded",String($("#events-panel").classList.contains("show-minor")));}const node=e.target.closest("[data-node]");if(node)inspectNode(node.dataset.node);const run=e.target.closest("[data-run]");if(run)chooseRun(run.dataset.run);const tab=e.target.closest("[data-tab]");if(tab)setTab(tab.dataset.tab);const citation=e.target.closest("[data-passage]");if(citation)showPassage(citation.dataset.passage);});
+document.addEventListener("click",e=>{const f=e.target.closest("[data-finding]");if(f){setTab("events");inspectFinding(f.dataset.finding);}const a=e.target.closest("[data-action]");if(a){setTab("graph");replayValue=null;renderGraph();inspectNode("tool:"+a.dataset.action);}const all=e.target.closest("[data-expand-minor]");if(all){$("#events-panel").classList.toggle("show-minor");all.setAttribute("aria-expanded",String($("#events-panel").classList.contains("show-minor")));}const node=e.target.closest("[data-node]");if(node)inspectNode(node.dataset.node);const run=e.target.closest("[data-run]");if(run)chooseRun(run.dataset.run);const tab=e.target.closest("[data-tab]");if(tab)setTab(tab.dataset.tab);const citation=e.target.closest("[data-passage]");if(citation){e.preventDefault();showPassage(citation.dataset.passage);}});
 document.addEventListener("input",e=>{if(e.target.id==="source-filter")filterSources(e.target.value);});
 window.addEventListener("resize",()=>{if(activeTab==="graph")renderGraph();});
 async function poll() {if(pollBusy)return;pollBusy=true;try{await loadSnapshot();await loadRuns();}catch(error){$("#connection").textContent="连接已中断 · 检查本地服务";}finally{pollBusy=false;}}
@@ -299,10 +320,11 @@ setInterval(poll,1800);
 const findingNames = {observed:"来源记载已发生",planned:"计划 / 尚未等同发生",statement:"来源陈述",unknown:"发生类型未知"};
 const evidenceStates = {source_supported:"有原文支持",source_context:"部分证据",important_unknown:"重要未知",hypothesis:"解释假设",disputed:"存在争议",changes_over_time:"状态随时间变化",corrected:"已有更正",historical_state:"历史状态",counterevidence_recorded:"记录了反证"};
 const gapNames = {temporal_audit:"时间或适用范围待补证",question_or_explanation_unresolved:"问题尚未完整回答",source_check:"出处与独立性待核查",missing_original:"尚缺原文",missing_event_date:"缺事件日期依据",chronology_unanchored:"时间脉络尚未建立",conflicting_evidence:"存在冲突证据"};
+const gapTitle = gap => gap.reference_month ? `${gap.reference_month} 数据待补证` : gap.question_part_id ? gap.title : gapNames[gap.kind] || gap.kind;
 const seenFindings = new Set();
 let selectedFinding = null;
 let lastAtlasSignature = "";
-function eventDate(span) {return span?.start ? span.start + (span.end && span.end!==span.start ? " → " + span.end : "") : "日期待确认 · 尚未绑定日期依据";}
+function eventDate(span) {return span?.start ? span.start + (span.end && span.end!==span.start ? " → " + span.end : "") : "日期未明确";}
 function renderEvents() {
   const view=data.event_view || {}, units=view.event_units || [], nodes=view.nodes || [];
   const signature=JSON.stringify([data.run_id,view,data.gaps,data.status,data.nodes.at(-1)]);
@@ -318,10 +340,10 @@ function renderEvents() {
     return `<section class="event-branch ${node.importance==="minor" ? "minor-branch" : ""}"><div class="branch-root"><span class="branch-flame">${icon("flame")}</span><div><small>${node.importance==="major"?"关键问题":"补充节点"} · ${esc(evidenceStates[node.status]||node.status)}</small><h3>${esc(node.title)}</h3><p>${esc(node.importance_reason||"")}</p></div></div><div class="question-parts">${(node.part_status||[]).map(p=>`<span class="part ${p.status==="model_assessed_answered"?"covered":"open"}">${esc(p.question)} · ${p.status==="model_assessed_answered"?"有对应原文":p.status==="disputed"?"争议":"待补证"}</span>`).join("")}</div><div class="event-spine">${findings.map(u=>{
       const fresh=!seenFindings.has(data.run_id+u.event_unit_id);seenFindings.add(data.run_id+u.event_unit_id);
       return `<button class="event-card ${fresh?"arrive":""} ${u.finding.stance==="contradicts"?"opposed":""}" data-finding="${esc(u.event_unit_id)}"><span class="event-pin">${icon("flame")}</span><time>${esc(eventDate(u.finding.event_time))}</time><small>${esc(findingNames[u.finding.occurrence])}${u.finding.stance==="contradicts"?" · 相反证据":""}</small><p>${esc(u.finding.assertion)}</p><span class="event-card-foot">${new Set(u.references.map(r=>r.version_id)).size} 个来源记录 · 查看依据 ${icon("arrow")}</span></button>`;
-    }).join("") || '<p class="unknown-card">尚无成功写回的原文发现；已经搜索或读取不代表问题已回答。</p>'}</div>${gaps.map(g=>`<div class="gap-leaf">${icon("unknown")}<span>${esc(gapNames[g.kind]||g.kind)} · ${g.status==="stalled"?"暂时停滞":"仍开放"} · 已检索 ${g.attempts||0} 轮</span></div>`).join("")}</section>`;
+    }).join("") || '<p class="unknown-card">尚无成功写回的原文发现；已经搜索或读取不代表问题已回答。</p>'}</div>${gaps.map(g=>`<div class="gap-leaf">${icon("unknown")}<span>${esc(gapTitle(g))} · ${g.status==="stalled"?"暂时停滞":"仍开放"} · 已检索 ${g.attempts||0} 轮</span></div>`).join("")}</section>`;
   }).join("");
   const relations=(view.relations||[]).map(r=>`<p>${esc(nodes.find(n=>n.node_id===r.first)?.title||r.first)} → ${esc(r.relation)} → ${esc(nodes.find(n=>n.node_id===r.second)?.title||r.second)}<br><small>${esc(r.reason)} · 模型提出的关系，按引用判断</small></p>`).join("");
-  $("#events-panel").innerHTML=`<div class="section-heading"><div><small class="small-label">EVENT ATLAS</small><h2>事件的脉络，证据的来路</h2><p>每个节点是一条保存的发现。点击展开依据、未知和对应调查动作。</p></div><button class="quiet-button" data-expand-minor aria-expanded="false">展开次要节点</button></div>${ribbon}${(data.gaps||[]).filter(g=>!g.node_id&&g.status!=="resolved").map(g=>`<p class="gap-leaf">${esc(gapNames[g.kind]||g.kind)} · ${esc(g.status)}</p>`).join("")}<div class="atlas-layout"><div class="event-atlas">${panels}${relations?`<section class="event-relations"><h3>已记录的事件关系</h3>${relations}</section>`:""}</div><aside id="event-inspector" class="inspector"><div class="inspector-label">EVIDENCE / CONTEXT</div><h3>选择一簇火苗</h3><p>查看这条发现的原文、事件日期、来源说明与实际写入动作。</p><p>地图显示当前累计状态；调查过程页可回放动作顺序。</p></aside></div><p class="footnote">${esc(view.notice)} · 不同网页不自动等于独立来源；相邻节点不自动构成因果。</p>`;
+  $("#events-panel").innerHTML=`<div class="section-heading"><div><small class="small-label">EVENT ATLAS</small><h2>事件的脉络，证据的来路</h2><p>每个节点是一条保存的发现。点击展开依据、未知和对应调查动作。</p></div><button class="quiet-button" data-expand-minor aria-expanded="false">展开次要节点</button></div>${ribbon}${(data.gaps||[]).filter(g=>!g.node_id&&g.status!=="resolved").map(g=>`<p class="gap-leaf">${esc(gapTitle(g))} · ${esc(g.status)}</p>`).join("")}<div class="atlas-layout"><div class="event-atlas">${panels}${relations?`<section class="event-relations"><h3>已记录的事件关系</h3>${relations}</section>`:""}</div><aside id="event-inspector" class="inspector"><div class="inspector-label">EVIDENCE / CONTEXT</div><h3>选择一簇火苗</h3><p>查看这条发现的原文、事件日期、来源说明与实际写入动作。</p><p>地图显示当前累计状态；调查过程页可回放动作顺序。</p></aside></div><p class="footnote">${esc(view.notice)} · 不同网页不自动等于独立来源；相邻节点不自动构成因果。</p>`;
   const expandButton=document.querySelector("[data-expand-minor]");
   if(expandButton)expandButton.setAttribute("aria-expanded",String($("#events-panel").classList.contains("show-minor")));
   if(selectedFinding && units.some(u=>u.event_unit_id===selectedFinding))inspectFinding(selectedFinding);

@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .event_view import event_projection
+from .report_presentation import current_brief, render_brief, report_brief, verified_review
 from .storage import read_json
 from .time_display import DATE_NOTE
 
@@ -55,7 +56,15 @@ KINDS = {
     "retain_temporal_unknown": "gap",
     "request_temporal_reaudit": "verify",
     "begin_investigation": "plan",
+    "replan_gap": "plan",
     "search_gap": "search",
+    "collect_monthly_history": "search",
+    "select_monthly_series": "read",
+    "search_current_sources": "search",
+    "read_current_sources": "read",
+    "refresh_current_status": "search",
+    "search_previous_sales": "search",
+    "record_current_result": "verify",
     "append_event_finding": "claim",
     "append_undated_finding": "claim",
     "create_event_node": "claim",
@@ -91,7 +100,15 @@ LABELS = {
     "retain_temporal_unknown": "补证后保留时间未知",
     "request_temporal_reaudit": "提交独立时间复审",
     "begin_investigation": "确定范围与核心问题",
+    "replan_gap": "根据反馈调整方案",
     "search_gap": "按缺口补搜",
+    "collect_monthly_history": "查找完整月度原表",
+    "select_monthly_series": "选定并读取月度序列",
+    "search_current_sources": "查最新一手消息和目标数据",
+    "read_current_sources": "核对一手原文",
+    "refresh_current_status": "发现预载旧记录，直查官方公告",
+    "search_previous_sales": "回查上一披露时段",
+    "record_current_result": "给出截至核查日的结论",
     "append_event_finding": "证据写回节点",
     "append_undated_finding": "保留未知日期的证据",
     "create_event_node": "建立事件分支",
@@ -228,6 +245,26 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
                     }
                 )
             previous = identifier
+        elif kind == "adaptive_search_dispatch" and event.get("action_id") in action_nodes:
+            node = nodes[action_nodes[event["action_id"]]]
+            if event.get("target_question"):
+                node["details"]["target"] = {
+                    k: event[k]
+                    for k in (
+                        "target_question",
+                        "question_part_id",
+                        "parent_gap_id",
+                        "reference_month",
+                        "window",
+                        "query",
+                    )
+                    if k in event
+                }
+                if month := event.get("reference_month"):
+                    node["label"] = "按月补查"
+                    node["title"] = f"{month} · {node['title']}"
+                else:
+                    node["label"] = "按分项补查"
         elif kind == "search_intent" and current_action:
             node = nodes[current_action]
             node["public_reason"] = event["purpose"]
@@ -271,6 +308,7 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
             "temporal_review_started",
             "temporal_target_deferred",
             "adaptive_gap_deferred",
+            "adaptive_replan_triggered",
         }:
             identifier = "event:" + str(seq)
             is_audit = kind == "temporal_review_started"
@@ -279,7 +317,10 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
             nodes[identifier] = {
                 "id": identifier,
                 "kind": "verify" if is_audit else "gap",
-                "title": "独立复审日期与问题覆盖" if is_audit else "搁置当前缺口，继续调查",
+                "title": {
+                    "temporal_review_started": "独立复审日期与问题覆盖",
+                    "adaptive_replan_triggered": "本轮证据不足，重新规划",
+                }.get(kind, "搁置当前缺口，继续调查"),
                 "status": "running" if is_audit else "blocked",
                 "sequence": seq,
                 "time": event["time"],
@@ -323,6 +364,41 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
                 end_sequence=seq,
                 final_status="completed" if event["status"] == "succeeded" else "blocked",
             )
+        elif kind in {
+            "monthly_series_route_changed",
+            "monthly_series_lookup_refined",
+            "monthly_series_source_selected",
+            "monthly_series_history_link",
+            "monthly_series_source_rejected",
+            "monthly_series_calculated",
+            "monthly_series_unresolved",
+        }:
+            identifier = "series:" + str(seq)
+            nodes[identifier] = {
+                "id": identifier,
+                "kind": "gap" if kind.endswith(("rejected", "unresolved")) else "verify",
+                "title": {
+                    "monthly_series_route_changed": "当前来源缺少完整表，改查统计数据库",
+                    "monthly_series_lookup_refined": "目录未得到可用原表，补搜序列入口",
+                    "monthly_series_source_selected": "Agent 选定统计序列",
+                    "monthly_series_history_link": "在指标页找到完整历史表链接",
+                    "monthly_series_source_rejected": "原表未通过口径或覆盖检查",
+                    "monthly_series_calculated": "读取同版原表并计算各月环比",
+                    "monthly_series_unresolved": "完整历史表仍有缺口，转为逐月检索",
+                }[kind],
+                "status": "blocked" if kind.endswith(("rejected", "unresolved")) else "completed",
+                "sequence": seq,
+                "time": event["time"],
+                "details": event,
+                "url": safe_url(event.get("url")),
+                "provenance": "runtime_event",
+            }
+            if event.get("points"):
+                nodes[identifier]["passage_ids"] = list(
+                    dict.fromkeys(pid for point in event["points"] for pid in point["passage_ids"])
+                )
+            edges.append({"from": previous, "to": identifier, "kind": "sequence", "sequence": seq})
+            previous = identifier
         elif kind == "retrieval_dispatch":
             # The tool boundary serializes calls, including nested gap searches.
             row = {**event, "node_id": current_action}
@@ -560,22 +636,49 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
             "新流程日期来自事件图原文绑定；未知日期保留。旧流程来自保存报告/主张。均不等于事实认证。"
         ),
     }
-    return apply_temporal_review(snapshot, maybe_json(run_dir / "temporal_review.json"))
+    latest_review = maybe_json(run_dir / "temporal_review.json")
+    snapshot = apply_temporal_review(snapshot, latest_review)
+    if adaptive.get("current_check") and not active and report:
+        draft = maybe_json(run_dir / "current_report_draft.json")
+        brief = current_brief(adaptive["current_check"], docs, passages, draft)
+        snapshot["report_brief"] = brief
+        snapshot["report_brief_html"] = render_brief(brief)
+    elif config.get("workflow") == "adaptive-event-map" and not active and report:
+        review = snapshot.get("temporal_review", {})
+        inherited_review = not review.get("decisions") and bool(latest_review)
+        if inherited_review:
+            review = next(
+                (
+                    row
+                    for path in sorted(
+                        run_dir.glob("temporal_reviews/*/record.json"),
+                        key=lambda item: item.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if verified_review(row := maybe_json(path), raw_graph)
+                ),
+                {},
+            )
+            if review:
+                snapshot["temporal_review_latest_status"] = latest_review.get("status")
+                snapshot = apply_temporal_review(snapshot, review)
+        brief = report_brief(
+            snapshot, review, repeat_review_incomplete=inherited_review and bool(review)
+        )
+        if brief:
+            snapshot["report_brief"] = brief
+            snapshot["report_brief_html"] = render_brief(brief)
+    return snapshot
 
 
 def apply_temporal_review(snapshot, review):
     """Apply a separate saved audit to presentation, never mutate source graph findings."""
     from .event_report import resolved_temporal_candidate
-    from .temporal_review import digest
     from .time_display import span_label
 
     if not review:
         return snapshot
-    valid = (
-        review.get("status") == "reviewed"
-        and review.get("graph_sha256") == snapshot["event_graph"].get("sha256")
-        and review.get("sha256") == digest({k: v for k, v in review.items() if k != "sha256"})
-    )
+    valid = verified_review(review, snapshot["event_graph"])
     decisions = {d["finding_id"]: d for d in review["decisions"]} if valid else {}
     snapshot["temporal_review"] = review if valid else {"status": "not_reviewed", "decisions": []}
     resolution_plan = {
@@ -644,6 +747,32 @@ def linked_text(text):
 
 def report_html(snapshot):
     """Standalone offline HTML: no model request, external scripts or remote assets."""
+    if brief := snapshot.get("report_brief"):
+        cited = {pid for s in brief["sources"] for pid in s["cited"]}
+        excerpts = "".join(
+            f'<blockquote id="{html.escape(p["passage_id"], quote=True)}">'
+            f"<strong>{html.escape(source['title'])}</strong><p>{html.escape(p['text'])}</p>"
+            "</blockquote>"
+            for source in snapshot["sources"]
+            for p in source["passages"]
+            if p["passage_id"] in cited
+        )
+        styles = Path(__file__).with_name("web_assets").joinpath("report.css").read_text()
+        return (
+            '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            "<title>研究报告 · Trace Atlas</title><style>"
+            + styles
+            + '</style><main class="brief-export"><h1>'
+            + html.escape(snapshot["question"])
+            + "</h1>"
+            + ("<p>脚本模拟验收 · 合成资料</p>" if snapshot["mock"] else "")
+            + ("<p>部分完成</p>" if snapshot["status"] == "partial" else "")
+            + render_brief(brief, standalone=True)
+            + "<details><summary>保存的引用原文</summary>"
+            + excerpts
+            + "</details></main></html>"
+        )
     lines = []
     table = False
     for line in snapshot["report"].splitlines():
