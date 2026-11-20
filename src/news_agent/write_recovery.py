@@ -63,14 +63,9 @@ class EventWriteRecovery:
 
     def capture(self, call, payload):
         stale = payload.get("error") == "stale node revision"
-        date_error = bool(payload.get("date_correction")) and (
-            payload.get("error")
-            in {
-                "event/applicability date must occur in original quotes, not metadata",
-                "year absent from original",
-            }
-            or str(payload.get("error", "")).startswith("date provenance:")
-        )
+        correction = payload.get("date_correction") or {}
+        # A delivered dated original can preserve more information than bind_unknown.
+        date_error = bool(correction) and not correction.get("date_support_candidates")
         if call["name"] not in {"append_event_finding", "append_undated_finding"} or not (
             stale or date_error
         ):

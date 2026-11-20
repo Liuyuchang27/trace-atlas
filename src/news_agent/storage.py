@@ -87,20 +87,32 @@ class EvidenceStore:
                 for within in range(0, len(paragraph), 1500):
                     part = paragraph[within : within + 1500]
                     start = offset + within
-                    identity = f"{document.version_id}:{document.content_hash}:{start}:{len(part)}"
-                    pid = "p-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
-                    passage = Passage(
-                        passage_id=pid,
-                        version_id=document.version_id,
-                        start=start,
-                        end=start + len(part),
-                        text=part,
-                    )
-                    self.passages[pid] = passage
-                    added.append(passage)
+                    added.append(self._passage(document, start, start + len(part)))
             offset += len(paragraph) + 2
         self.persist()
         return added
+
+    def _passage(self, document, start, end):
+        identity = f"{document.version_id}:{document.content_hash}:{start}:{end - start}"
+        pid = "p-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+        passage = Passage(
+            passage_id=pid,
+            version_id=document.version_id,
+            start=start,
+            end=end,
+            text=document.content[start:end],
+        )
+        self.passages[pid] = passage
+        return passage
+
+    def add_source_spans(self, version_id, spans):
+        document = self.documents[version_id]
+        spans = list(dict.fromkeys(spans))
+        if any(not 0 <= start < end <= len(document.content) for start, end in spans):
+            raise ValueError("source span exceeds saved document")
+        passages = {span: self._passage(document, *span) for span in spans}
+        self.persist()
+        return passages
 
     def add_claim(
         self, text: str, passage_ids: list[str], event_time: str | None, stage: str | None

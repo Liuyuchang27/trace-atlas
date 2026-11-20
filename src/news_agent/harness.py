@@ -25,6 +25,8 @@ from .adaptive_mock import AdaptiveFixtureModel
 from .budget import Budget, BudgetCallback, BudgetExceeded, input_upper_estimate
 from .context import EvidenceContext, context_policy
 from .core_context import CoreEvidenceContext
+from .current_check import related_preorder_notes
+from .current_report import report_draft, synthesis_messages
 from .event_graph import PROMPT as EVENT_GRAPH_PROMPT
 from .event_graph import EventGraph, graph_tools
 from .event_graph import policy as event_graph_policy
@@ -252,7 +254,9 @@ class ResearchBoundary(AgentMiddleware):
                 for t in tools
                 if (t.name if hasattr(t, "name") else t.get("name")) in WRITING_TOOLS
             ]
-            if self.adaptive:
+            if self.adaptive and self.adaptive.current_check:
+                tools = []
+            elif self.adaptive:
                 tools = [
                     t
                     for t in tools
@@ -268,10 +272,16 @@ class ResearchBoundary(AgentMiddleware):
                     if active["node_id"]:
                         bindings.add("append_undated_finding")
                     tools = [t for t in tools if t.name in bindings]
+            writing_reason = (
+                "Successive research turns found no usable new evidence. Preserve unresolved "
+                "parts as limitations and finish the report from the saved originals."
+                if self.budget.state["stop_reason"] == "adaptive_no_progress"
+                else "The research allowance has ended."
+            )
             messages = [
                 *messages,
                 HumanMessage(
-                    "The research allowance has ended. No new searches or document reads are "
+                    writing_reason + " No new searches or document reads are "
                     "permitted. Use the remaining evidence tools to record material findings "
                     "with their original passage IDs, event_time and stage where supported. "
                     "Then write the final or partial report using only evidence already collected."
@@ -402,18 +412,26 @@ class ResearchBoundary(AgentMiddleware):
         )
         stage = stage_for(tools, writing)
         routed = {"model": self.router.select(stage)} if self.router else {}
+        settings = {
+            **request.model_settings,
+            "max_tokens": output_limit(stage, self.budget.config)
+            if self.router
+            else self.budget.config.max_output_tokens,
+        }
+        if writing and self.adaptive and (current := self.adaptive.current_check):
+            if notes := related_preorder_notes(current.data):
+                system, evidence = synthesis_messages(notes)
+                request = request.override(system_message=system)
+                messages = [evidence]
+                choice = None
+                settings["response_format"] = {"type": "json_object"}
         return await handler(
             request.override(
                 **routed,
                 tools=tools,
                 messages=messages,
                 tool_choice=choice,
-                model_settings={
-                    **request.model_settings,
-                    "max_tokens": output_limit(stage, self.budget.config)
-                    if self.router
-                    else self.budget.config.max_output_tokens,
-                },
+                model_settings=settings,
             )
         )
 
@@ -443,8 +461,9 @@ class ResearchBoundary(AgentMiddleware):
                         self.adaptive.temporal_repair.record_feedback(
                             call, {"error": "tool unavailable in current phase"}
                         )
-                    elif count >= 2:
-                        self.budget.finish_research("repeated_unavailable_tool")
+                    # Tool calls from the same model response share a surface. Reject
+                    # each unavailable call, then let the next turn correct the action.
+                    # The progress watchdog can defer a stalled gap based on evidence.
                     self.budget.save()
                     self.store.event("adaptive_surface_denied", action_id=call["id"], **rejected)
                     return ToolMessage(
@@ -1054,6 +1073,17 @@ async def run_research(
     if adaptive:
         adaptive.search = next(t for t in tools if t.name == "search")
         tools.extend(adaptive.tools())
+        if adapter == "tavily" and task.cutoff is None:
+            from .current_check import CurrentCheck, applies
+            from .series_collection import monthly_history_tools
+
+            if applies(task):
+                reader = next(t for t in tools if t.name == "read_document")
+                adaptive.current_check = CurrentCheck(task, adaptive, corpus, reader)
+                tools.extend(adaptive.current_check.tools())
+            else:
+                adaptive.monthly_history_enabled = True
+                tools.extend(monthly_history_tools(adaptive, corpus))
     allowed = {t.name for t in tools} | {"write_todos"}
     router = StageRouter(budget) if model_profile == PROFILE else None
     boundary = ResearchBoundary(
@@ -1109,7 +1139,7 @@ async def run_research(
                 model_finalized = bool(text.strip()) and not last.tool_calls
                 if final_finish_reason in {"length", "max_tokens"}:
                     status, reason, model_finalized = "partial", "output_limit", False
-                if model_finalized:
+                if model_finalized and not (adaptive and adaptive.current_check):
                     if adaptive:
                         from .temporal_repair import complete_temporal_cycle
 
@@ -1164,6 +1194,28 @@ async def run_research(
             reason = "cancelled_by_user"
         status = "partial"  # original provider failure and unknown usage remain visible
     report_source = "model" if text else "recorded_claim_fallback"
+    if adaptive and adaptive.current_check:
+        current = adaptive.current_check
+        notes = related_preorder_notes(current.data)
+        draft = None
+        if notes and model_finalized:
+            try:
+                draft = report_draft(notes, text)
+            except ValueError:
+                store.event("current_report_draft_rejected", reason="missing_or_unbound_summary")
+            else:
+                store.save("current_report_draft.json", draft)
+                store.event(
+                    "current_report_synthesized", passage_ids=[n["passage_id"] for n in notes]
+                )
+        text = current.report(draft)
+        report_source = "current_fact_check"
+        if status == "complete":
+            receipt = current.data.get("result")
+            if receipt and receipt["outcome"] != "insufficient":
+                reason = "current_fact_checked"
+            else:
+                status, reason = "partial", "current_check_incomplete"
     if revision.get("output_mode") == "event_report_from_graph_bindings":
         report_source = "event_graph_bindings_template"
     elif revision.get("output_mode") == "template_from_model_bindings":
@@ -1184,8 +1236,23 @@ async def run_research(
     text, invalid = validate_and_append_sources(text, evidence)
     if invalid:
         status, reason = "partial", "invalid_citations"
-    if budget.state["phase"] == "writing" and status == "complete":
-        status, reason = "partial", budget.state["stop_reason"]
+    if (
+        budget.state["phase"] == "writing"
+        and status == "complete"
+        and reason != "current_fact_checked"
+    ):
+        reason = budget.state["stop_reason"]
+        reviewed_series = (
+            adaptive
+            and reason == "adaptive_gaps_resolved_or_stalled"
+            and any(
+                row["status"] == "completed" for row in adaptive.data.get("series_attempts", [])
+            )
+            and (run_dir / "temporal_review.json").exists()
+            and read_json(run_dir / "temporal_review.json").get("status") == "reviewed"
+        )
+        if not reviewed_series:
+            status = "partial"
     if adaptive:
         adaptive.refresh()
         if status == "complete" and any(

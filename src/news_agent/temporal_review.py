@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import Field
 
 from .event_graph import Finding
+from .historical_series import calculated_value_in_original
 from .schemas import StrictModel
 from .storage import read_json
 
@@ -114,15 +115,45 @@ def review_input(task, evidence, plan):
         for r in n["findings"]
     }
     rows = []
+    nodes = evidence.event_graph.data["nodes"]
     for row in plan["graph_choices"]:
-        refs = saved[row["finding_id"]]["references"]
+        saved_row = saved[row["finding_id"]]
+        refs = saved_row["references"]
         for ref in refs:
             doc = evidence.documents[ref["version_id"]]
             if doc.content[ref["start"] : ref["end"]] != ref["quote"]:
                 raise ValueError("temporal_review_original_mismatch")
+        finding = saved_row["finding"]
+        units = {
+            p["monthly_series"]["unit"]
+            for p in nodes[row["node_id"]].get("question_parts", [])
+            if p.get("monthly_series")
+            and finding.get("question_part_id")
+            in {p["part_id"], p["monthly_series"]["anchor_part_id"]}
+        }
+        verified_calculation = (
+            finding.get("monthly_calculation") == "adjacent_levels"
+            and finding["event_time"]["precision"] == "month"
+            and finding["valid_time"]["precision"] == "unknown"
+            and any(
+                calculated_value_in_original(
+                    finding["monthly_value"],
+                    finding["event_time"]["start"],
+                    refs,
+                    unit,
+                    evidence.documents,
+                )
+                for unit in units
+            )
+        )
         rows.append(
             {
                 **row,
+                **(
+                    {"calculation_verification": "matched_adjacent_originals"}
+                    if verified_calculation
+                    else {}
+                ),
                 "originals": [
                     {
                         "passage_id": r["passage_id"],
@@ -149,7 +180,15 @@ def review_input(task, evidence, plan):
                 "assigned_finding_ids": [
                     r["finding_id"]
                     for r in rows
-                    if r["node_id"] == n["node_id"] and r.get("question_part_id") == p["part_id"]
+                    if r["node_id"] == n["node_id"]
+                    and (
+                        r.get("question_part_id") == p["part_id"]
+                        or (
+                            p.get("monthly_series")
+                            and r.get("calculation_verification")
+                            and r.get("question_part_id") == p["monthly_series"]["anchor_part_id"]
+                        )
+                    )
                 ],
             }
             for n in evidence.event_graph.data["nodes"].values()
@@ -173,6 +212,17 @@ def validate_review(text, payload):
         row = rows[decision.finding_id]
         if set(decision.passage_ids) - set(row["passage_ids"]):
             raise ValueError("temporal_review_unbound_citation")
+        if row.get("calculation_verification"):
+            decision = decision.model_copy(
+                update={
+                    "event_verdict": "supported",
+                    "date_role": "event_occurrence",
+                    "event_reason": "已用同版相邻两月原值复算。所属月为后一个观察月。",
+                    "applicability": "not_applicable",
+                    "applicability_reason": "月度统计值归属于记录的观察月，无单独适用时段。",
+                    "passage_ids": row["passage_ids"],
+                }
+            )
         selected = [r for r in row["originals"] if r["passage_id"] in decision.passage_ids]
         finding = Finding(
             assertion=row["assertion"],
@@ -369,8 +419,20 @@ async def run_review(task, evidence, plan, model, budget, config, router=None):
             else reviewer.bind(response_format={"type": "json_object"})
         )
         async with asyncio.timeout(budget.timeout()):
+            instructions = PROMPT
+            if any(row.get("calculation_verification") for row in payload["findings"]):
+                instructions += (
+                    "For a finding with calculation_verification, the number is derived from "
+                    "two explicit consecutive observation months in one table. The latter row "
+                    "is the observation date. The change need not appear verbatim. When judging "
+                    "coverage, a linked trend can include its designated latest-month finding "
+                    "if listed in assigned_finding_ids."
+                )
             response = await requester.ainvoke(
-                [SystemMessage(PROMPT), HumanMessage(json.dumps(payload, ensure_ascii=False))],
+                [
+                    SystemMessage(instructions),
+                    HumanMessage(json.dumps(payload, ensure_ascii=False)),
+                ],
                 config=config,
             )
         (store.root / "temporal_review_response.txt").write_text(response.text)
@@ -383,6 +445,10 @@ async def run_review(task, evidence, plan, model, budget, config, router=None):
         record.update(
             status="reviewed", reason=None, decisions=validate_review(response.text, payload)
         )
+        if verified := [
+            row["finding_id"] for row in payload["findings"] if row.get("calculation_verification")
+        ]:
+            record["program_verified_monthly_dates"] = verified
         record["coverage_decisions"] = [
             d.model_dump() for d in TimeReview.model_validate_json(response.text).coverage_decisions
         ]

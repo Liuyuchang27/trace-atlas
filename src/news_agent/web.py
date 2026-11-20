@@ -226,11 +226,12 @@ def make_server(root, port=8768, *, budget=None):
             if not self.valid_host():
                 return self.respond({"error": "invalid host"}, 403)
             path = urlsplit(self.path).path
-            if path in {"/", "/app.js", "/style.css", "/icons.js"}:
+            if path in {"/", "/app.js", "/style.css", "/report.css", "/icons.js"}:
                 name = {
                     "/": "index.html",
                     "/app.js": "app.js",
                     "/style.css": "style.css",
+                    "/report.css": "report.css",
                     "/icons.js": "icons.js",
                 }[path]
                 mime = {
@@ -238,6 +239,7 @@ def make_server(root, port=8768, *, budget=None):
                     "app.js": "text/javascript",
                     "icons.js": "text/javascript",
                     "style.css": "text/css",
+                    "report.css": "text/css",
                 }[name]
                 return self.respond(
                     (assets / name).read_text(), content_type=mime + "; charset=utf-8"

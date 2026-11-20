@@ -15,6 +15,8 @@ from langchain_core.tools import tool
 from pydantic import Field, model_validator
 
 from .answer_contract import dates
+from .historical_series import calculated_value_in_original
+from .monthly_series import month_coverage, monthly_value_in_original
 from .schemas import StrictModel
 from .selections import excerpts
 from .storage import read_json
@@ -22,6 +24,23 @@ from .storage import read_json
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def month_in_original(value, text):
+    year, month = map(int, value.split("-"))
+    name = calendar.month_name[month]
+    short = calendar.month_abbr[month]
+    return (
+        any(day.startswith(value) for day, *_ in dates(text))
+        or bool(re.search(rf"(?<!\d){re.escape(value)}(?!\d)", text))
+        or bool(
+            re.search(
+                rf"\b(?:{name}|{short}\.?)\s+{year}\b|(?<!\d){year}\s*年\s*0?{month}\s*月",
+                text,
+                re.I,
+            )
+        )
+    )
 
 
 def policy():
@@ -127,9 +146,21 @@ class Finding(StrictModel):
     answers_node_question: bool = False
     answers_question_part: bool = False
     question_part_id: str | None = Field(default=None, max_length=32)
+    monthly_value: int | None = Field(
+        default=None,
+        ge=-(10**15),
+        le=10**15,
+        exclude_if=lambda v: v is None,
+        description="Numeric value for a single observed month of a declared monthly series.",
+    )
+    monthly_calculation: Literal["adjacent_levels"] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
     @model_validator(mode="after")
     def answer_has_evidence(self):
+        if self.monthly_calculation and self.monthly_value is None:
+            raise ValueError("monthly calculation requires a numeric value")
         if (self.answers_node_question or self.answers_question_part) and (
             not self.originals or self.stance not in {"supports", "contradicts"}
         ):
@@ -146,11 +177,22 @@ class Scope(StrictModel):
     minimum_event_anchors: Literal[0, 1, 2] = 2
 
 
+class MonthlySeries(StrictModel):
+    periods: int = Field(ge=2, le=12, description="Consecutive months inclusive of latest.")
+    anchor_part_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
+    unit: str = Field(min_length=1, max_length=32, description="Comparable source unit.")
+
+
 class QuestionPart(StrictModel):
     part_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
     question: str = Field(min_length=1, max_length=180)
     required_occurrence: Literal["observed", "planned", "statement", "any"] = "any"
     requires_date: bool = False
+    monthly_series: MonthlySeries | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Use for a monthly trend. Anchor to the separate latest-release question part.",
+    )
 
 
 class ExcerptRef(StrictModel):
@@ -291,14 +333,8 @@ class EventGraph:
         elif span.precision == "year":
             if not re.search(r"(?<!\d)" + span.start + r"(?!\d)", quotes):
                 raise ValueError("year absent from original")
-        elif not any(d.startswith(span.start) for d in parsed) and span.start not in quotes:
-            year, month = map(int, span.start.split("-"))
-            name = calendar.month_name[month]
-            short = calendar.month_abbr[month]
-            if not re.search(
-                rf"\b(?:{name}|{short})\s+{year}\b|{year}\s*年\s*0?{month}\s*月", quotes, re.I
-            ):
-                raise ValueError("month requires ISO month or an original dated statement")
+        elif not month_in_original(span.start, quotes):
+            raise ValueError("month requires ISO month or an original dated statement")
 
     def set_scope(self, scope, expected_revision):
         if scope.premise == "source_supported" and not any(
@@ -390,6 +426,39 @@ class EventGraph:
             p["part_id"] for p in parts
         }:
             raise ValueError("choose a declared question_part_id")
+        if finding.monthly_value is not None:
+            series = [
+                p["monthly_series"]
+                for p in parts
+                if p.get("monthly_series")
+                and finding.question_part_id
+                in {p["part_id"], p["monthly_series"]["anchor_part_id"]}
+            ]
+            if (
+                finding.event_time.precision != "month"
+                or finding.occurrence != "observed"
+                or finding.stance != "supports"
+                or not series
+            ):
+                raise ValueError(
+                    "monthly value needs the announced series, exact observed month, "
+                    "and original number"
+                )
+            value, month = finding.monthly_value, finding.event_time.start
+            verified = (
+                any(
+                    calculated_value_in_original(
+                        value, month, references, spec["unit"], self.evidence.documents
+                    )
+                    for spec in series
+                )
+                if finding.monthly_calculation
+                else monthly_value_in_original(value, month, [r.quote for r in finding.originals])
+            )
+            if not verified:
+                raise ValueError(
+                    "monthly value needs the original number or reproducible adjacent levels"
+                )
         if parts and finding.originals and not finding.question_part_id:
             raise ValueError(
                 "bind each atomic finding to one question_part_id; split event and plan"
@@ -753,10 +822,14 @@ class EventGraph:
             covered = any(
                 f["finding"]["stance"] in {"supports", "contradicts"} for f in coverage_rows
             )
+            series = month_coverage(part, selected) if part.get("monthly_series") else None
+            if series:
+                covered = bool(series["anchor"] and not series["missing"])
             disputed = {"supports", "contradicts"} <= stances
             part_status.append(
                 {
                     **part,
+                    **({"month_coverage": series} if series else {}),
                     "status": "disputed"
                     if disputed
                     else "model_assessed_answered"
@@ -771,6 +844,12 @@ class EventGraph:
         for part in part_status:
             decision = coverage.get((node_id, part["part_id"]))
             if decision:
+                if (
+                    part.get("monthly_series")
+                    and decision["verdict"] == "sufficient"
+                    and (not part["month_coverage"]["anchor"] or part["month_coverage"]["missing"])
+                ):
+                    continue
                 part.update(
                     status={
                         "sufficient": "model_assessed_answered",
@@ -885,12 +964,81 @@ class EventGraph:
         }
 
 
+def date_support_candidates(graph, finding):
+    from .event_report import _span_supported, event_original_text
+
+    versions = {graph.evidence.passages[r.passage_id].version_id for r in finding.originals}
+    if len(versions) != 1:
+        return []
+    selected = "\n".join(event_original_text(r.quote) for r in finding.originals)
+    missing = {
+        name: span
+        for name, span in (("event_time", finding.event_time), ("valid_time", finding.valid_time))
+        if not _span_supported(span, selected)
+    }
+    used = {r.passage_id for r in finding.originals}
+    candidates = []
+    for pid in graph.budget.state.get("delivered_passages", []):
+        passage = graph.evidence.passages.get(pid)
+        if pid in used or passage is None or passage.version_id not in versions:
+            continue
+        choices = (
+            [{"text": passage.text, "excerpt_id": None}]
+            if 3 <= len(passage.text) <= 900
+            else excerpts(pid, passage.text)
+        )
+        for choice in choices:
+            original = selected + "\n" + event_original_text(choice["text"])
+            matches = [name for name, span in missing.items() if _span_supported(span, original)]
+            if matches:
+                candidates.append(
+                    {
+                        "passage_id": pid,
+                        "excerpt_id": choice["excerpt_id"],
+                        "text": choice["text"],
+                        "matching_fields": matches,
+                    }
+                )
+                break
+        if len(candidates) == 3:
+            break
+    return candidates
+
+
 def graph_tools(graph):
+    literal_date_errors = {
+        "event/applicability date must occur in original quotes, not metadata",
+        "year absent from original",
+        "month requires ISO month or an original dated statement",
+    }
+
     def answer(fn, **args):
+        finding = args.get("finding")
+        state = graph.budget.state
+        key = None
+        if hasattr(graph.evidence, "adaptive") and isinstance(finding, BoundFinding):
+            key = digest(
+                [
+                    args.get("node_id"),
+                    finding.question_part_id,
+                    finding.event_time.model_dump(),
+                    finding.valid_time.model_dump(),
+                    sorted({(r.passage_id, r.excerpt_id or "") for r in finding.originals}),
+                ]
+            )
+            if correction := state.get("rejected_date_writes", {}).get(key):
+                graph.budget.store.event(
+                    "repeated_date_write_blocked",
+                    node_id=args.get("node_id"),
+                    question_part_id=finding.question_part_id,
+                )
+                return json.dumps(
+                    {"error": "repeated unsupported date", "next_step": correction},
+                    ensure_ascii=False,
+                )
         try:
             value = fn(**args)
-            previous = graph.budget.state.get("last_finding_rejection", {})
-            finding = args.get("finding")
+            previous = state.get("last_finding_rejection", {})
             if (
                 finding is not None
                 and previous.get("node_id") == args.get("node_id")
@@ -902,46 +1050,65 @@ def graph_tools(graph):
         except (ValueError, KeyError) as exc:
             result = {"error": str(exc), "current": graph.summary()}
             feedback = None
-            if hasattr(graph.evidence, "adaptive") and isinstance(
-                args.get("finding"), BoundFinding
-            ):
+            resolved = None
+            if key is not None:
                 try:
                     from .event_report import precision_feedback
 
-                    resolved = graph.resolve_selected(args["finding"])
+                    resolved = graph.resolve_selected(finding)
                     feedback = precision_feedback(resolved)
                     result["finding_feedback"] = feedback
-                    graph.budget.state["last_finding_rejection"] = {
-                        "node_id": args.get("node_id"),
-                        "question_part_id": resolved.question_part_id,
-                        "error": str(exc),
-                        "submitted_assertion": resolved.assertion,
-                        "passage_ids": [r.passage_id for r in resolved.originals],
-                        **feedback,
-                    }
-                    graph.budget.save()
                 except (ValueError, KeyError):
                     pass
             if (
-                "date must occur in original" in str(exc)
-                or "year absent" in str(exc)
-                or str(exc).startswith("date provenance:")
+                str(exc) in literal_date_errors or str(exc).startswith("date provenance:")
             ) and not (feedback and feedback["extra_assertion_numbers_only"]):
-                result["date_correction"] = {
+                correction = {
                     "instruction": (
-                        "Do not resubmit the unsupported full date. If the original gives "
-                        "month/day only, explicitly use append_undated_finding with exact "
-                        "date_text and uncertainty. It has no year or ISO-date fields. "
-                        "Publication date is separate from event date. No write was committed."
+                        "Choose a new original that explicitly dates this same event, search "
+                        "for the missing date, or retain unknown precision without inventing "
+                        "bounds. For partial date wording use append_undated_finding with the "
+                        "exact date_text and uncertainty. A publication date is not an event "
+                        "date. Leave this field unresolved if it cannot be bound and continue "
+                        "other question parts. No write was committed."
                     ),
                     "node_id": args.get("node_id"),
                 }
+                result["date_correction"] = correction
                 if args.get("node_id") not in graph.data["nodes"]:
-                    result["date_correction"]["instruction"] = (
+                    correction["instruction"] = (
                         "The initial question has no evidence date. Reissue record_event_finding "
                         "with event_time/valid_time omitted or precision=unknown and no bounds. "
                         "Keep the user's cutoff in scope only. No write was committed."
                     )
+                if resolved is not None and (
+                    candidates := date_support_candidates(graph, resolved)
+                ):
+                    correction["date_support_candidates"] = candidates
+                    correction["instruction"] = (
+                        "Check whether a supplied same-document candidate dates the same event "
+                        "or period. If so, explicitly add its passage_id and excerpt_id to "
+                        "originals alongside the factual passage. Otherwise search for explicit "
+                        "support or keep the unsupported date unknown and continue other parts. "
+                        "No write was committed."
+                    )
+                if key is not None and str(exc) in literal_date_errors:
+                    rejected = state.setdefault("rejected_date_writes", {})
+                    rejected[key] = correction
+                    if len(rejected) > 32:
+                        del rejected[next(iter(rejected))]
+                    graph.budget.save()
+            if feedback is not None:
+                state["last_finding_rejection"] = {
+                    "node_id": args.get("node_id"),
+                    "question_part_id": resolved.question_part_id,
+                    "error": str(exc),
+                    "submitted_assertion": resolved.assertion,
+                    "passage_ids": [r.passage_id for r in resolved.originals],
+                    **feedback,
+                    **({"date_correction": correction} if "date_correction" in result else {}),
+                }
+                graph.budget.save()
             return json.dumps(result, ensure_ascii=False)
 
     @tool
@@ -962,6 +1129,11 @@ def graph_tools(graph):
                 raise ValueError("use a title <=300 characters and at most 6 question parts")
             if len({p.part_id for p in parts}) != len(parts):
                 raise ValueError("question part IDs must be unique")
+            anchors = {p.part_id for p in parts if p.monthly_series is None}
+            if any(
+                p.monthly_series and p.monthly_series.anchor_part_id not in anchors for p in parts
+            ):
+                raise ValueError("each monthly series needs a separate latest-release anchor part")
             if graph.data["nodes"] or graph.data["scope_history"]:
                 raise ValueError("investigation already initialized; inspect existing state")
             graph.set_scope(scope, 0)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx
@@ -69,6 +70,19 @@ class LocalCorpus:
 
 class RetrievalFailure(ValueError):
     """Safe provider failure code, without credential-bearing response bodies."""
+
+
+def publication_day(value):
+    """Normalize ISO and RFC 2822 publication dates returned by the provider."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        try:
+            return parsedate_to_datetime(value).date()
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 def live_retrieval_policy():
@@ -161,6 +175,21 @@ class TavilyCorpus:
             }
         return version_id
 
+    def register_origin(self, url, domains, title="", query=""):
+        vid = self.register(url, title)
+        origin_id = vid.replace("web-", "origin-", 1)
+        self.candidates.setdefault(
+            origin_id,
+            {
+                **self.candidates[vid],
+                "version_id": origin_id,
+                "origin_domains": sorted(domains),
+                "discovery_query": query,
+            },
+        )
+        self.persist()
+        return origin_id
+
     def _settle(self, rid, operation, data, error=None, status_code=None):
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         credits = usage.get("credits") if isinstance(usage, dict) else None
@@ -251,7 +280,20 @@ class TavilyCorpus:
         limit: int = 5,
         timeout: float = 30,
         include_domains: list[str] | None = None,
+        publication_window: tuple[str, str] | None = None,
+        news: bool = False,
+        prefer_domains: bool = False,
     ) -> list[dict]:
+        date_filters = {}
+        if publication_window:
+            first, last = map(date.fromisoformat, publication_window)
+            date_filters = {
+                # Tavily documents strict before/after bounds. Include the requested days.
+                "start_date": (first - timedelta(days=1)).isoformat(),
+                "end_date": (last + timedelta(days=1)).isoformat(),
+                "include_published_date": True,
+                "filter_by_published_date": True,
+            }
         domains = []
         for domain in include_domains or []:
             if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain):
@@ -269,6 +311,9 @@ class TavilyCorpus:
                 "include_raw_content": False,
                 "include_usage": True,
                 **({"include_domains": domains} if domains else {}),
+                **({"include_domains_mode": "prefer"} if domains and prefer_domains else {}),
+                **date_filters,
+                **({"topic": "news"} if news else {}),
             },
             timeout,
         )
@@ -279,12 +324,17 @@ class TavilyCorpus:
         for item in results:
             if not isinstance(item, dict):
                 continue
+            published = item.get("published_date")
+            if publication_window and published:
+                day = publication_day(published)
+                if day is None or not first <= day <= last:
+                    continue
             try:
                 vid = self.register(
                     item["url"],
                     item.get("title", ""),
                     item.get("content") or "",
-                    item.get("published_date"),
+                    published,
                 )
             except (ValueError, KeyError):
                 continue
@@ -299,6 +349,8 @@ class TavilyCorpus:
         if version_id not in self.candidates:
             raise ValueError("read requires a returned candidate ID; use open_url for a new URL")
         candidate = self.candidates[version_id]
+        if candidate.get("origin_domains"):
+            return await self._read_origin(candidate, timeout)
         data = await self._request(
             "extract",
             {
@@ -321,12 +373,63 @@ class TavilyCorpus:
         text = item.get("raw_content")
         if not isinstance(text, str) or not text.strip():
             raise RetrievalFailure("page_has_no_extracted_content")
+        return self._save_extraction(
+            version_id,
+            candidate["url"],
+            item.get("title") or candidate["title"],
+            text,
+            "Tavily extracted markdown; not original HTML",
+        )
+
+    async def _read_origin(self, candidate, timeout):
+        from uuid import uuid4
+
+        from .origin_pages import fetch_origin_html, page_text
+
+        rid = uuid4().hex
+        url = candidate["url"]
+        if self.budget:
+            for key in ("retrieval_api_calls", "web_extract_requests"):
+                self.budget.state[key] = self.budget.state.get(key, 0) + 1
+            self.budget.save()
+        if self.store:
+            self.store.event(
+                "retrieval_dispatch",
+                request_id=rid,
+                operation="extract",
+                provider="publisher_origin",
+                arguments={"urls": [url]},
+            )
+        error, status = None, None
+        try:
+            final_url, html = await fetch_origin_html(url, candidate["origin_domains"], timeout)
+            status = 200
+            title, content = page_text(html)
+            if not content:
+                raise RetrievalFailure("origin_has_no_readable_content")
+            return self._save_extraction(
+                candidate["version_id"],
+                final_url,
+                title or candidate["title"],
+                content,
+                "Publisher HTTPS response; visible text and links extracted from received HTML",
+            )
+        except (OSError, httpx.HTTPError) as exc:
+            error = type(exc).__name__
+            raise RetrievalFailure("publisher_origin_unavailable") from exc
+        except BaseException as exc:
+            error = type(exc).__name__
+            raise
+        finally:
+            self._settle(rid, "extract", {"usage": {"credits": 0}}, error, status)
+
+    def _save_extraction(self, version_id, url, title, text, extraction):
         maximum = live_retrieval_policy()["max_document_characters"]
         observed = datetime.now(UTC)
         doc = DocumentVersion(
             version_id=version_id,
-            title=item.get("title") or candidate["title"],
-            url=candidate["url"],
+            title=title,
+            url=url,
             content=text[:maximum],
             retrieved_at=observed,
         )
@@ -337,7 +440,7 @@ class TavilyCorpus:
             "truncated": len(text) > maximum,
             "content_sha256": doc.content_hash,
             "observed_at": observed.isoformat(),
-            "extraction": "Tavily extracted markdown; not original HTML",
+            "extraction": extraction,
             "historical_availability_verified": False,
         }
         self.persist()

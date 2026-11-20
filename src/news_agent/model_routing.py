@@ -65,6 +65,8 @@ def stage_for(tools, writing=False):
         return "evidence_repair"
     if "begin_investigation" in names:
         return "scope_planning"
+    if "read_current_sources" in names:
+        return "retrieval_selection"
     if names & {
         "append_event_finding",
         "create_event_node",
@@ -72,11 +74,12 @@ def stage_for(tools, writing=False):
         "record_event_finding",
         "record_event_relation",
         "review_node_sources",
+        "record_current_result",
     }:
         return "evidence_assessment"
     if writing or not names:
         return "report_draft"
-    if "search_gap" in names:
+    if names & {"search_gap", "replan_gap", "search_current_sources"}:
         return "gap_planning"
     return "retrieval_selection"
 
