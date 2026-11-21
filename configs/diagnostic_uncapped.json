@@ -7,5 +7,6 @@
   "reserve_tool_calls": 8,
   "reserve_tokens": 20000,
   "reserve_seconds": 120,
-  "max_output_tokens": 16000
+  "max_output_tokens": 16000,
+  "planning_output_tokens": 393216
 }
