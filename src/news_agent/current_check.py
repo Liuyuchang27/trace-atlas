@@ -13,8 +13,9 @@ from langchain_core.tools import tool
 
 from .answer_contract import dates
 from .budget import BudgetExceeded
-from .current_report import synthesize_notes
+from .current_report import answer_lead, bound_points, synthesize_notes
 from .event_graph import OriginalRef
+from .official_routes import language_signals, recover
 from .retrieval import RetrievalFailure, public_url, publication_day
 from .schemas import StrictModel
 from .source_paths import discover_links
@@ -36,7 +37,7 @@ QUANTITY = re.compile(r"\d[\d,.]*\s*(?:million|billion|copies|units|万|亿|份)
 ESTIMATE = re.compile(r"\bestimat\w*\b|预估|估算|估计", re.I)
 SALES_QUESTION = re.compile(r"销量|销售量|售出|\bsales\b|\b(?:units|copies) sold\b", re.I)
 RELEASED = re.compile(
-    r"\b(?:now available|out now|has launched|is now live)\b(?!\s+for\s+pre)|"
+    r"\b(?:now available|available now|out now|has launched|released today|is now live)\b(?!\s+for\s+pre)|"
     r"现已(?:发售|上市|推出)|已正式(?:发售|上市)",
     re.I,
 )
@@ -129,6 +130,12 @@ def result_view(state):
             "record_on": None,
             "text": UNKNOWN_LAUNCH_ANSWER,
         }
+    if state.get("sales_question") and result["outcome"] != "confirmed":
+        subject = state.get("official_recovery", {}).get("subject", "该产品")
+        result = {
+            **result,
+            "text": f"截至本次核查，所读官方原文中未找到 {subject} 截至核查时点的累计售出总份数。",
+        }
     older_record = result.get("data_through") or result.get("record_on")
     label = (
         "最近一次可核实的实际数据"
@@ -146,20 +153,60 @@ def result_view(state):
     }
 
 
+def written_view(state, draft):
+    view = result_view(state)
+    points = bound_points(state, draft)
+    lead = answer_lead(state, draft)
+    if lead:
+        view["text"] = lead["text"]
+    if points:
+        best = next(
+            (
+                p
+                for p in points
+                if p["official"] and re.search(r"份|套|units|copies", p["summary"], re.I)
+            ),
+            next((p for p in points if p["official"]), points[0]),
+        )
+        rest = [p for p in points if p is not best]
+        qualifier = (lead or {}).get("text", "") if best["scope"] != "direct" else ""
+        if state.get("sales_question") and best["scope"] != "direct" and not qualifier:
+            qualifier = "截至核查时点，所读原文未能确认发售后的累计销量。"
+        view["text"] = best["summary"] + " " + qualifier
+        view["lead_ids"] = best["citations"]
+        view["lead_source"] = best["source"]
+        view["lead_published"] = best.get("publication_day")
+        view["reported_scope"] = best["scope"]
+        view["other_findings"] = rest
+        view["lead_official"] = best["official"]
+    return view
+
+
 def related_preorder_notes(state):
     """Keep earlier preorder observations without upgrading them into actual sales."""
     notes = {}
     previous = state.get("previous_period", {})
-    secondary = set(previous.get("hits", [])) - set(previous.get("official_ids", []))
+    recovery = state.get("official_recovery", {})
+    secondary_refs = recovery.get("secondary_refs", [])
+    secondary = (set(previous.get("hits", [])) - set(previous.get("official_ids", []))) | {
+        r["version_id"] for r in secondary_refs
+    }
+
     refs = (state.get("result") or {}).get("references", []) + state.get("previous_period", {}).get(
         "related_refs", []
     )
-    for ref in refs:
+    for ref in [*secondary_refs, *refs]:
         quote = ref.get("quote", "")
         # Use complete statements, so a later qualifier is not lost by truncating it.
         for line in re.split(r"(?<=[.!?。！？])\s+|\n+|(?<=。)", quote):
             text = line.strip().removeprefix("- ")
-            if not (12 <= len(text) <= 380 and PREORDERS.search(text)):
+            if not (12 <= len(text) <= 650 and PREORDERS.search(text) and QUANTITY.search(text)):
+                continue
+            if re.search(
+                r"net (?:bookings|income)|guidance|historic(?:al)? year|财年指引|历史性的一年",
+                text,
+                re.I,
+            ):
                 continue
             if text.endswith((".", "。", "!", "！", "?", "？")):
                 prior = notes.get(ref["version_id"])
@@ -169,11 +216,37 @@ def related_preorder_notes(state):
                         label = "第三方预购估算" if ESTIMATE.search(text) else "第三方预购报道"
                     notes[ref["version_id"]] = {
                         "text": text,
+                        "source": next(
+                            (
+                                row["url"]
+                                for row in recovery.get("evidence", [])
+                                if any(
+                                    p["id"] == ref["passage_id"] for p in row.get("passages", [])
+                                )
+                            ),
+                            ref.get("source_url", ""),
+                        ),
                         "label": label,
                         "passage_id": ref["passage_id"],
                         "version_id": ref["version_id"],
                     }
     return sorted(notes.values(), key=lambda n: bool(QUANTITY.search(n["text"])), reverse=True)[:2]
+
+
+def report_preorder_notes(state, draft):
+    points = [p for p in bound_points(state, draft) if not p["official"]]
+    covered_urls = {p["url"] for p in points}
+    covered_ids = {p["passage_id"] for p in points}
+    versions = {
+        r["version_id"]
+        for r in state.get("official_recovery", {}).get("secondary_refs", [])
+        if r.get("source_url") in covered_urls or r.get("passage_id") in covered_ids
+    }
+    return [
+        n
+        for n in synthesize_notes(related_preorder_notes(state), draft)
+        if n.get("source") not in covered_urls and n["version_id"] not in versions
+    ]
 
 
 class CurrentCheck:
@@ -204,6 +277,8 @@ class CurrentCheck:
                 "read_attempted": [],
             },
         )
+        self.data["original_question"] = task.question.split(MARKER, 1)[0].strip()
+        self.data["sales_question"] = self.sales_question
         adaptive.save()
 
     def save(self):
@@ -216,8 +291,10 @@ class CurrentCheck:
         title = doc.title.split(" | ")[0]
         current = self.data.setdefault("freshness", {})
         first = doc.content[:8000]
+        subject = self.data.get("official_recovery", {}).get("subject")
         if (
-            RELEASED.search(title)
+            (not subject or subject.casefold() in title.casefold())
+            and RELEASED.search(title)
             and not PRELAUNCH.search(title)
             and not UNSUPPORTED_PRELAUNCH.search(title)
         ):
@@ -293,6 +370,12 @@ class CurrentCheck:
             {
                 **self.data,
                 "instruction": (
+                    "Name the actual measured quantity first. A broad corporate outlook, projected bookings, "
+                    "executive enthusiasm or an adjective supplies no product units. Only report background "
+                    "when it quantifies the requested product and says whose estimate it is. "
+                    "When covering different authorities choose each authority's editorial language "
+                    "and distinct host. For an English-language publisher use its English product name and "
+                    "English search terms. Recover missing roles using the dedicated coverage tool. "
                     "Answer the user's current fact directly as of cutoff. Start from the "
                     "entity's first-party publisher, regulator or data issuer, with separate "
                     "queries for the latest relevant update and for the exact requested fact. "
@@ -323,6 +406,30 @@ class CurrentCheck:
         attempts = self.data["attempts"]
         freshness = self.data.get("freshness", {})
         previous = self.data.get("previous_period", {}).get("stage")
+        recovery = self.data.get("official_recovery", {})
+        signals = (
+            language_signals(self.data, self.corpus)
+            if attempts and hasattr(self.corpus, "candidates")
+            else {}
+        )
+        if (
+            attempts
+            and not recovery.get("finished")
+            and (
+                freshness.get("stale_sources")
+                or (
+                    self.release_sensitive
+                    and (signals.get("localized_queries") or signals.get("concentrated_locale"))
+                )
+                or (
+                    self.sales_question
+                    and (self.data["read_attempted"] or not any(attempts[0]["hits"].values()))
+                )
+            )
+        ):
+            return [t for t in tools if t.name == "recover_official_sources"]
+        if recovery.get("finished") and not previous:
+            return [t for t in tools if t.name == "record_current_result"]
         if previous in {"search", "assess"}:
             names = {"search_previous_sales" if previous == "search" else "record_current_result"}
         elif (
@@ -352,6 +459,45 @@ class CurrentCheck:
         return [t for t in tools if t.name in names]
 
     def tools(self):
+        @tool
+        async def recover_official_sources(
+            subject: str,
+            issuer: str,
+            publisher_index: str,
+            disclosure_index: str,
+            update_query: str,
+            disclosure_query: str,
+            config: RunnableConfig,
+        ) -> str:
+            """Correct missing or stale official coverage. Give the canonical full product/subject name,
+            corporate issuer name, official publisher newsroom URL and financial disclosures/IR URL
+            within the declared authorities. Write a fresh release query and a company results query
+            in the respective issuer's primary language. Prefer the specific requested product and measure over corporate forecasts or general quarterly results. This reads separate originals and checks for
+            a quantified third-party preorder estimate when researching sales."""
+            try:
+                result = await recover(
+                    self,
+                    subject,
+                    issuer,
+                    publisher_index,
+                    disclosure_index,
+                    update_query,
+                    disclosure_query,
+                    config,
+                )
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+            if self.sales_question and self.data.get("metric_evidence"):
+                self.data["result"] = {
+                    "outcome": "insufficient",
+                    "text": "本轮已取得有统计口径的原文。",
+                    "references": [],
+                    "record_on": None,
+                }
+                self.save()
+                self.budget.finish_research("current_sources_checked")
+            return json.dumps(result, ensure_ascii=False)
+
         @tool
         async def search_previous_sales(query: str, config: RunnableConfig) -> str:
             """Find the latest documented actual sales from an earlier reporting period.
@@ -666,11 +812,13 @@ class CurrentCheck:
             outcome: Literal["confirmed", "not_found", "insufficient"],
             text: str,
             passage_ids: list[str],
+            actual_units_quote: str | None = None,
             record_on: date | None = None,
             data_through: date | None = None,
         ) -> str:
             """Close with a concise public answer and selected original passage IDs.
 
+            For sales, confirmed also requires actual_units_quote: the exact first-party sentence identifying the product and its actual units sold or shipped; distinguish these metrics.
             confirmed requires the exact requested fact and the latest applicable original
             date (record_on). If the sources lack the requested disclosure, use not_found only
             after reading two relevant first-party originals, including one from requested_fact.
@@ -733,6 +881,26 @@ class CurrentCheck:
                     raise ValueError(
                         "A confirmed result needs the recent dated record of the asked fact."
                     )
+                if self.sales_question and outcome == "confirmed":
+                    quote = actual_units_quote or ""
+                    if not (
+                        QUANTITY.search(quote)
+                        and re.search(
+                            r"sold|shipped|sell.through|sell.in|售出|销量|出货|販売本数",
+                            quote,
+                            re.I,
+                        )
+                        and not re.search(
+                            r"forecast|projected|expected|predict|estimate|预期|估计|预估",
+                            quote,
+                            re.I,
+                        )
+                        and not PREORDERS.search(quote)
+                        and any(p.version_id in fact_ids and quote in p.text for p in passages)
+                    ):
+                        raise ValueError(
+                            "Actual product units need a matching first-party original sentence with the number and actual metric."
+                        )
                 if outcome == "not_found" and (
                     len(versions) < 2 or not versions & fact_ids or not versions & update_ids
                 ):
@@ -773,6 +941,7 @@ class CurrentCheck:
 
         return [
             search_current_sources,
+            recover_official_sources,
             read_current_sources,
             refresh_current_status,
             search_previous_sales,
@@ -780,11 +949,19 @@ class CurrentCheck:
         ]
 
     def report(self, draft=None):
-        view = result_view(self.data)
+        view = written_view(self.data, draft)
         confirmed = view["outcome"] == "confirmed"
         refs = " ".join(f"[{ref['passage_id']}]" for ref in view.get("references", []))
+        if view.get("lead_ids"):
+            refs = " ".join(f"[{pid}]" for pid in view["lead_ids"])
         findings = []
-        if notes := synthesize_notes(related_preorder_notes(self.data), draft):
+        for point in view.get("other_findings", []):
+            attribution = "官方披露" if point["official"] else "第三方估算"
+            citations = " ".join(f"[{pid}]" for pid in point["citations"])
+            findings.extend(
+                [f"{attribution}（{point['source']}） · {point['summary']} {citations}", ""]
+            )
+        if notes := report_preorder_notes(self.data, draft):
             findings.extend(["## 已查到的预购信息", ""])
             findings.extend(
                 f"{note['label']} · {note.get('summary', note['text'])} [{note['passage_id']}]\n"
@@ -795,6 +972,12 @@ class CurrentCheck:
             findings.extend([f"官方 {release['day']} 公告确认已发售。{launch_refs}", ""])
         heading = view["label"] if confirmed else "核查结论"
         conclusion = [f"## {heading}", "", f"核查截至 {view['cutoff_label']}。", view["text"], refs]
+        if view.get("lead_source"):
+            conclusion.append(
+                "依据 "
+                + view["lead_source"]
+                + (" · 公告日期 " + view["lead_published"] if view.get("lead_published") else "")
+            )
         if view["record_on"]:
             conclusion.extend(["", f"原始记录日期 {view['record_on']}"])
         if cutoff := view.get("data_through"):
@@ -803,5 +986,5 @@ class CurrentCheck:
             conclusion.append("本轮未取得更新的发售状态公告。")
         conclusion.append("")
         lines = ["# 最新消息核查", ""]
-        lines.extend(conclusion + findings if confirmed else findings + conclusion)
+        lines.extend(conclusion + findings)
         return "\n".join(lines).strip() + "\n"

@@ -99,7 +99,11 @@ def check_progress(adaptive, budget):
         reason = "当前缺口连续操作未获得可用新证据，保留待查并继续其他问题。"
         adaptive.close_round(reason)
         gap = adaptive.data["gaps"][current["gap_id"]]
-        if gap["status"] == "open" and current.get("replan", {}).get("status") != "pending":
+        if (
+            not current.get("batch_targets")
+            and gap["status"] == "open"
+            and current.get("replan", {}).get("status") != "pending"
+        ):
             gap["status"] = "stalled"
             adaptive.save()
             budget.store.event("adaptive_gap_deferred", gap_id=gap["gap_id"], reason=reason)

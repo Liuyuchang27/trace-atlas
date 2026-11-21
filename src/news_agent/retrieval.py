@@ -225,7 +225,9 @@ class TavilyCorpus:
             timeout = min(timeout, self.budget.remaining_time())
             s = self.budget.state
             s["retrieval_api_calls"] = s.get("retrieval_api_calls", 0) + 1
-            key = "web_search_requests" if operation == "search" else "web_extract_requests"
+            key = {"map": "web_map_requests", "search": "web_search_requests"}.get(
+                operation, "web_extract_requests"
+            )
             s[key] = s.get(key, 0) + 1
             s.setdefault("retrieval_pending", {})[rid] = operation
             self.budget.save()
@@ -273,6 +275,23 @@ class TavilyCorpus:
             raise
         finally:
             self._settle(rid, operation, data, error, status)
+
+    async def map_index(self, url, instructions, timeout):
+        data = await self._request(
+            "map",
+            {
+                "url": public_url(url),
+                "instructions": instructions,
+                "max_depth": 2,
+                "max_breadth": 20,
+                "limit": 24,
+                "allow_external": False,
+                "timeout": min(30, int(timeout)),
+                "include_usage": True,
+            },
+            timeout,
+        )
+        return [item for item in data.get("results", []) if isinstance(item, str)]
 
     async def asearch(
         self,
@@ -424,7 +443,9 @@ class TavilyCorpus:
             self._settle(rid, "extract", {"usage": {"credits": 0}}, error, status)
 
     def _save_extraction(self, version_id, url, title, text, extraction):
-        maximum = live_retrieval_policy()["max_document_characters"]
+        maximum = getattr(
+            self, "document_character_limit", live_retrieval_policy()["max_document_characters"]
+        )
         observed = datetime.now(UTC)
         doc = DocumentVersion(
             version_id=version_id,

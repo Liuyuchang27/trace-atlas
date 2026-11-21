@@ -130,7 +130,7 @@ class Budget:
                 return True
             return False
 
-    def before_model(self, action_id: str, estimate: int):
+    def before_model(self, action_id: str, estimate: int, output_tokens: int | None = None):
         with self._lock:
             self.refresh_phase(estimate)
             if self.remaining_time() <= 0:
@@ -140,7 +140,7 @@ class Budget:
                 and self.state["model_calls"] >= self.config.max_model_calls
             ):
                 raise BudgetExceeded("model_call_limit")
-            reservation = estimate + self.config.max_output_tokens
+            reservation = estimate + (output_tokens or self.config.max_output_tokens)
             if (
                 self.config.max_tokens is not None
                 and self.used_tokens() + reservation > self.config.max_tokens
@@ -228,7 +228,10 @@ class BudgetCallback(BaseCallbackHandler):
                 tool_bytes = len(json.dumps(tools).encode()) + 2048 if tools else 0
         estimate = sum(input_upper_estimate(batch, tool_bytes) for batch in messages)
         self.budget.store.event("request_shape", tool_schema_bytes=tool_bytes)
-        self.budget.before_model(str(run_id), estimate)
+        requested = params.get("max_tokens") if isinstance(params, dict) else None
+        self.budget.before_model(
+            str(run_id), estimate, requested if isinstance(requested, int) else None
+        )
         if isinstance(params, dict):
             self.budget.store.event(
                 "provider_request_config",

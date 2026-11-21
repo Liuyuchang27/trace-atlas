@@ -11,6 +11,8 @@ FLASH = "deepseek:deepseek-flash"
 PRO = "deepseek:deepseek-v4-pro"
 REVIEW_REASONING_EFFORT = "high"
 STAGES = {
+    "research_planning": (PRO, True),
+    "publication_decision": (PRO, True),
     "scope_planning": (PRO, False),
     "gap_planning": (PRO, False),
     "retrieval_selection": (FLASH, False),
@@ -23,6 +25,8 @@ STAGES = {
 
 
 OUTPUT_TARGETS = {
+    "research_planning": 393216,
+    "publication_decision": 16000,
     "scope_planning": 10000,
     "gap_planning": 10000,
     "retrieval_selection": 6000,
@@ -35,7 +39,10 @@ OUTPUT_TARGETS = {
 
 
 def output_limit(stage, config):
-    return min(config.max_output_tokens, OUTPUT_TARGETS[stage])
+    cap = config.max_output_tokens
+    if stage == "research_planning" and config.planning_output_tokens is not None:
+        cap = config.planning_output_tokens
+    return min(cap, OUTPUT_TARGETS[stage])
 
 
 def policy():
@@ -51,23 +58,37 @@ def policy():
         },
         "budget": "shared_original_total_and_output_cap",
         "output_targets": OUTPUT_TARGETS,
-        "output_rule": "min(stage_target, budget.max_output_tokens)",
+        "output_rule": "min(stage_target, configured stage or default output limit)",
         "retries": retry_policy(),
         "fallback": "none",
-        "thinking_scope": "isolated_tool_free_temporal_and_final_review",
+        "thinking_scope": "isolated_tool_free_research_planning_and_reviews",
         "reasoning_visibility": "never_export_private_reasoning",
     }
 
 
 def stage_for(tools, writing=False):
     names = {t.name if hasattr(t, "name") else t.get("name") for t in tools}
+    if names == {"review_publication_metrics"}:
+        return "publication_decision"
+    if names & {
+        "save_observations",
+        "search_publications",
+        "confirm_edition",
+        "read_publication",
+        "finish_publication",
+    }:
+        return "evidence_assessment"
     if "resolve_event_write" in names:
         return "evidence_repair"
+    if "begin_research_plan" in names:
+        return "research_planning"
     if "begin_investigation" in names:
         return "scope_planning"
     if "read_current_sources" in names:
         return "retrieval_selection"
     if names & {
+        "save_observations",
+        "confirm_edition",
         "append_event_finding",
         "create_event_node",
         "append_undated_finding",
@@ -75,11 +96,20 @@ def stage_for(tools, writing=False):
         "record_event_relation",
         "review_node_sources",
         "record_current_result",
+        "recover_official_sources",
     }:
         return "evidence_assessment"
     if writing or not names:
         return "report_draft"
-    if names & {"search_gap", "replan_gap", "search_current_sources"}:
+    if names & {
+        "search_gap",
+        "search_evidence_batch",
+        "search_monthly_records",
+        "locate_latest_edition",
+        "search_planned_months",
+        "replan_gap",
+        "search_current_sources",
+    }:
         return "gap_planning"
     return "retrieval_selection"
 
