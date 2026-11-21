@@ -13,6 +13,7 @@ REVIEW_REASONING_EFFORT = "high"
 STAGES = {
     "research_planning": (PRO, True),
     "publication_decision": (PRO, True),
+    "event_coverage": (PRO, True),
     "scope_planning": (PRO, False),
     "gap_planning": (PRO, False),
     "retrieval_selection": (FLASH, False),
@@ -27,6 +28,7 @@ STAGES = {
 OUTPUT_TARGETS = {
     "research_planning": 393216,
     "publication_decision": 16000,
+    "event_coverage": 16000,
     "scope_planning": 10000,
     "gap_planning": 10000,
     "retrieval_selection": 6000,

@@ -163,6 +163,8 @@ class ResearchBoundary(AgentMiddleware):
         self.cache = read_json(path) if path.exists() else {}
 
     async def awrap_model_call(self, request, handler):
+        if self.adaptive and (event := self.adaptive.event_review) and event.parts():
+            return await event.model_turn(request, handler, self.router)
         if self.adaptive:
             check_progress(self.adaptive, self.budget)
             self.adaptive.temporal_repair.check_progress()
@@ -1259,7 +1261,10 @@ async def run_research(
                 tools.extend(adaptive.current_check.tools())
             else:
                 from .edition import EditionResearch
+                from .event_review import EventReview
 
+                adaptive.event_review = EventReview(adaptive, corpus)
+                tools.extend(adaptive.event_review.tools())
                 adaptive.editions = EditionResearch(adaptive, corpus)
                 tools.extend(adaptive.editions.tools())
                 adaptive.monthly_history_enabled = True
@@ -1322,7 +1327,9 @@ async def run_research(
                 if model_finalized and not (
                     adaptive
                     and (
-                        adaptive.current_check or (adaptive.editions and adaptive.editions.parts())
+                        adaptive.current_check
+                        or (adaptive.editions and adaptive.editions.parts())
+                        or (adaptive.event_review and adaptive.event_review.parts())
                     )
                 ):
                     if adaptive:
@@ -1408,6 +1415,16 @@ async def run_research(
             status, reason = "complete", "publication_complete"
         elif status == "complete":
             status, reason = "partial", "publication_partial"
+    if adaptive and (event := adaptive.event_review) and event.parts():
+        report_source = "event_coverage_review"
+        if not text.strip():
+            text = event.fallback()
+        if status == "complete":
+            status, reason = (
+                ("partial", "event_material_unknown")
+                if event.pending()
+                else ("complete", "event_coverage_reviewed")
+            )
     if revision.get("output_mode") == "event_report_from_graph_bindings":
         report_source = "event_graph_bindings_template"
     elif revision.get("output_mode") == "template_from_model_bindings":
@@ -1431,7 +1448,8 @@ async def run_research(
     if (
         budget.state["phase"] == "writing"
         and status == "complete"
-        and reason not in {"current_fact_checked", "publication_complete"}
+        and reason
+        not in {"current_fact_checked", "publication_complete", "event_coverage_reviewed"}
     ):
         reason = budget.state["stop_reason"]
         reviewed_series = (
