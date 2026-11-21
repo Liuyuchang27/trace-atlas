@@ -31,6 +31,22 @@ The workbench exposes the **调查过程** view for observing and replaying acti
 
 The staged profile uses DeepSeek Flash and DeepSeek V4 Pro and enables high reasoning for the isolated date and report reviews. Transient DeepSeek request failures can retry up to three times, with delays of 12, 16, and 20 seconds. Request counts and token limits apply to the shared run budget. You can inspect the retry in the workbench.
 
+For the staged profile, a small output cap also includes the model's reasoning tokens.
+You can keep ordinary calls at 1,500 tokens while allowing more room for planning and
+reviews with a budget JSON file:
+
+```json
+{"max_output_tokens": 1500, "planning_output_tokens": 16000, "review_output_tokens": 16000}
+```
+
+Pass it with `--budget` to `ask`, `run`, or `serve`. `review_output_tokens` applies to
+report, temporal, publication-definition, and event-coverage reviews; each still uses
+the lower of its stage target and the configured cap. Omit the stage overrides to
+retain `max_output_tokens` for every stage. All requests reserve their actual output
+cap against the unchanged shared run budget, so larger caps can reach the total
+budget sooner. Truncated JSON planning and current-report replies are recorded as
+partial outputs with returned usage, without an automatic retry or a successful-answer label.
+
 ## November 21 trial
 
 The planner can dispatch independent evidence searches in parallel (up to 42). For a series, the agent can read several periods from the same original table and compare the planned measure with its headings. The current-fact report writer receives the original question and cited passages and distinguishes official disclosures from third-party estimates.
