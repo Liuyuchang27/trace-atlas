@@ -62,6 +62,9 @@ KINDS = {
     "retain_temporal_unknown": "gap",
     "request_temporal_reaudit": "verify",
     "begin_research_plan": "plan",
+    "search_event_records": "search",
+    "read_event_records": "read",
+    "assess_event_coverage": "verify",
     "locate_latest_edition": "search",
     "search_planned_months": "search",
     "begin_investigation": "plan",
@@ -119,6 +122,9 @@ LABELS = {
     "retain_temporal_unknown": "补证后保留时间未知",
     "request_temporal_reaudit": "提交独立时间复审",
     "begin_research_plan": "规划原始资料与分析任务",
+    "search_event_records": "按未答问题查找原始记录",
+    "read_event_records": "读取选定的原文",
+    "assess_event_coverage": "核对新事实和剩余缺口",
     "locate_latest_edition": "查找发布机构最新原文",
     "search_planned_months": "按观察月检索原始发布",
     "begin_investigation": "确定范围与核心问题",
@@ -538,6 +544,32 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
                 )
             edges.append({"from": previous, "to": identifier, "kind": "sequence", "sequence": seq})
             previous = identifier
+        elif kind in {"event_batch_assessed", "event_coverage_decision"}:
+            identifier = f"coverage:{seq}"
+            title = "结束取证 · " + str(event.get("reason", ""))
+            if kind == "event_batch_assessed":
+                title = (
+                    f"核对原文 · 新增 {event['accepted']} 项事实，"
+                    f"剩余 {len(event['remaining'])} 项核心问题"
+                )
+            nodes[identifier] = {
+                "id": identifier,
+                "kind": "verify",
+                "title": title,
+                "status": "completed",
+                "sequence": seq,
+                "time": event["time"],
+                "details": event,
+                "provenance": "runtime_event",
+            }
+            edges.append(
+                {
+                    "from": current_action or previous,
+                    "to": identifier,
+                    "kind": "explicit",
+                    "sequence": seq,
+                }
+            )
         elif kind in {
             "publication_period_verified",
             "publication_source_inspected",
@@ -894,7 +926,12 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
         brief = current_brief(adaptive["current_check"], docs, passages, draft)
         snapshot["report_brief"] = brief
         snapshot["report_brief_html"] = render_brief(brief)
-    elif config.get("workflow") == "adaptive-event-map" and not active and report:
+    elif (
+        config.get("workflow") == "adaptive-event-map"
+        and not active
+        and report
+        and result.get("report_source") != "event_coverage_review"
+    ):
         review = snapshot.get("temporal_review", {})
         inherited_review = not review.get("decisions") and bool(latest_review)
         if inherited_review:

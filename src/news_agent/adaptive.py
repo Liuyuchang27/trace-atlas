@@ -175,6 +175,7 @@ class AdaptiveInvestigation:
         self.search = None
         self.reader = None
         self.current_check = None
+        self.event_review = None
         self.editions = None
         self.monthly_history_enabled = False
         self.parallel_search_enabled = False
@@ -344,6 +345,15 @@ class AdaptiveInvestigation:
                         "Find material earlier/later event anchors",
                     )
                 )
+        if self.event_review and self.event_review.parts():
+            return [
+                (
+                    "investigation",
+                    "question_or_explanation_unresolved",
+                    "major",
+                    self.graph.task.question,
+                )
+            ]
         return rows + self.temporal_repair.gaps()
 
     def signature(self, node_id):
@@ -376,6 +386,10 @@ class AdaptiveInvestigation:
                 part_id = part["part_id"]
                 if part["status"] == "model_assessed_answered" and part_id not in anchors_needed:
                     continue
+                if self.event_review and self.event_review.parts():
+                    if part_id not in self.event_review.pending():
+                        continue
+                    importance = "major"
                 scope = {"question_part_id": part_id}
                 if part.get("evidence_needed"):
                     scope["evidence_needed"] = part["evidence_needed"]
@@ -386,7 +400,12 @@ class AdaptiveInvestigation:
                     scope.update(publication=spec["publication"], domain=spec.get("domain"))
                 series = part.get("month_coverage")
                 if series is None or (series["anchor"] and not series["missing"]):
-                    needs.append((nid, kind, importance, part["question"], scope))
+                    title = (
+                        self.event_review.pending()[part_id]
+                        if self.event_review and self.event_review.parts()
+                        else part["question"]
+                    )
+                    needs.append((nid, kind, importance, title, scope))
                 elif series["anchor"]:
                     needs.extend(
                         (
@@ -420,6 +439,7 @@ class AdaptiveInvestigation:
                     **scope,
                 }
             else:
+                old["title"] = title
                 if "blocked_by" in scope:
                     old["blocked_by"] = scope["blocked_by"]
                 if old["status"] == "resolved" or (
@@ -445,7 +465,11 @@ class AdaptiveInvestigation:
                 self.data["gaps"][gid]["status"] = "open" if has_work else "stalled"
         for gid, row in self.data["gaps"].items():
             if gid not in present and row.get("parent_gap_id") not in present:
-                row["status"] = "resolved"
+                deferred = self.event_review.s.get("context_only", {}) if self.event_review else {}
+                if reason := deferred.get(row.get("question_part_id")):
+                    row.update(status="stalled", importance="minor", stop_reason=reason)
+                else:
+                    row["status"] = "resolved"
         self.save()
 
     def measure(self, gap, part_id=None):

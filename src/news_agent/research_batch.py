@@ -40,6 +40,25 @@ the period slots, shares one edition across metrics, and can search/read up to
 {MAX_CONCURRENT_SEARCHES} originals concurrently. For individual records or event histories
 use records with distinct evidence_needed and genuine dependencies. A source-independent
 explanation can wait for its underlying records. A single original table can establish many periods and measures. Read it once, bind each supported cell and dispatch only remaining gaps. Use month-independent metric labels, without provisional dates. Plan exactly the requested number of OUTPUT observations; any earlier comparison base is an input only. For changes in a published index choose the publisher's headline period-on-period and year-on-year changes when available, with adjustment and geography stated. Prefer the publisher's measured changes over computing extra cumulative or annualized indicators. Add a level series only when the user asks for the level. Monthly plans already create an edition-verification task: never duplicate the latest month/date or lookup routes in records. Put table selection and finding the latest release in access_route. Domain means bare host. Do not predetermine the range before verifying the actual release. Verify the latest observed period using a current edition and the publisher calendar. An overdue forecast triggers a search for a later release.
+For event retrospectives, work backwards from the answer to the actual user question.
+A follow-up question imagined by the planner is not itself a required deliverable. Specify
+the coarsest outcome that answers the user. Keep each core part atomic; leave optional
+durations, technical thresholds, exact names and procedural details outside the required
+parts unless the user asked or opposing answers would change the main conclusion.
+Avoid duplicate answer needs and prioritize the observed endpoint. Treat an original schedule,
+subsidiary actors, the exact approval mechanism, and counterfactual alternatives as optional
+unless the user asks about them or the core result cannot be explained without them. One
+retrospective account can establish a change and its cause. Use only as many parts as needed.
+For event retrospectives including "what happened in the end?", plan atomic ANSWER needs
+in records, not a checklist of documents. Assign each an event_role: outcome for each distinct
+material observed result, cause and turn for essential explanation, optional for incidental
+detail, essential for other explicitly requested information. A post-event result is necessary;
+a proposed change or a pre-event schedule cannot establish it. Avoid compound parts with
+multiple independent facts. Exact dates, who implemented a decision, formal approvals, or
+duplicate sources are not required unless their absence changes the answer. Set requires_date
+only if the answer itself needs a verified absolute date. Use required_occurrence=observed for
+outcomes; otherwise use any unless a specific kind of statement was requested. Do not prefill
+expected dates, venues, results or claims from memory in the plan. Keep scope open to revisions.
 Never expand a simple request into unrequested topics. Keep the plan in the user's language
 except for search titles. Return a concise public plan with no private reasoning."""
 

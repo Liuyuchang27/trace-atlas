@@ -224,6 +224,16 @@ class MonthlySeries(StrictModel):
 
 
 class QuestionPart(StrictModel):
+    date_request: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="For event records only: exact user words that explicitly request an absolute date.",
+    )
+    event_role: Literal["cause", "turn", "outcome", "essential", "optional"] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="For a retrospective event account, classify each atomic answer need. Outcome means what actually happened. Optional details cannot block delivery. Omit for non-event questions.",
+    )
     part_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
     question: str = Field(min_length=1, max_length=180)
     required_occurrence: Literal["observed", "planned", "statement", "any"] = "any"
@@ -1496,7 +1506,41 @@ def graph_tools(graph):
                     ),
                 )
             )
+        if not measures:
+            question = graph.task.question.split("Run observation context:")[0]
+            for record in records:
+                if record.event_role:
+                    # A useful date in an original is always retained. Only a user-requested
+                    # absolute date may block delivery of an otherwise established event.
+                    record.requires_date = bool(
+                        record.requires_date
+                        and record.date_request
+                        and record.date_request in question
+                    )
+                    if record.event_role == "outcome":
+                        record.required_occurrence = "observed"
         parts.extend(records)
+        if (
+            not measures
+            and len(parts) < 6
+            and any(p.event_role == "outcome" for p in parts)
+            and not any(p.event_role in {"turn", "cause"} for p in parts)
+        ):
+            context_id = next(
+                f"context-{i}" for i in range(7) if f"context-{i}" not in {p.part_id for p in parts}
+            )
+            parts.append(
+                QuestionPart(
+                    part_id=context_id,
+                    event_role="optional",
+                    question=(
+                        "什么变化影响了最终结果，原文如何解释原因？"
+                        if re.search(r"[\u4e00-\u9fff]", question)
+                        else "What change shaped the outcome, and why?"
+                    ),
+                    evidence_needed="Retain the cause and turning point when reading. Incidental details do not require a search.",
+                )
+            )
         return await begin_investigation.ainvoke(
             dict(
                 scope=scope.model_dump(),
