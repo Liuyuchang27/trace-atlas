@@ -107,7 +107,7 @@ function render() {
   $("#condition-label").hidden = data.workflow === "adaptive-event-map";
   $("#status").textContent = statusNames[data.status] || data.status; $("#status").className = `status ${data.status}`;
   const lastRoute = data.model_routes?.at(-1);
-  const stageNames = {research_planning:"研究任务分解",publication_decision:"核对原表行列",scope_planning:"范围规划",gap_planning:"缺口规划",retrieval_selection:"检索读取",evidence_assessment:"证据判断",evidence_repair:"证据纠错",report_draft:"报告初稿",report_review:"报告核对",temporal_review:"日期与分项审核"};
+  const stageNames = {research_planning:"研究任务分解",publication_decision:"核对原表行列",event_coverage:"核对事件实际结果",scope_planning:"范围规划",gap_planning:"缺口规划",retrieval_selection:"检索读取",evidence_assessment:"证据判断",evidence_repair:"证据纠错",report_draft:"报告初稿",report_review:"报告核对",temporal_review:"日期与分项审核"};
   const effortNames = {low:"低强度思考",high:"高强度思考",max:"最高强度思考"};
   const thinkingLabel = lastRoute?.thinking === "enabled"
     ? effortNames[lastRoute.reasoning_effort] || "思考模式" : "普通模式";
@@ -513,6 +513,16 @@ function inspectNode(id) {
   let body = `<div class="inspector-label">${esc(node.label || kinds[node.kind] || "NODE")} / ${esc(node.provenance === "model_reported" ? "模型公开摘要" : "实际执行记录")}</div><h3>${esc(title)}</h3>`;
   if (node.provenance === "model_reported") body += `<p>${esc(node.reason || args.reason || "未附加公开决策说明。")}</p><p>模型报告状态：${esc(statusNames[node.status] || node.status)}</p>`;
   else body += `<p>${esc(statusNames[node.status] || node.status)}${node.time ? " · "+esc(new Date(node.time).toLocaleTimeString("zh-CN",{timeZone:"Asia/Hong_Kong",hour12:false}))+" HKT" : ""}</p>`;
+  if (detail.answer_review) {
+    const review = detail.answer_review;
+    body += `<h4>目前能回答什么</h4><p>${esc(review.answer_now)}</p><p>${esc(review.reason)}</p>`;
+    for (const gap of review.material_gaps || []) {
+      body += `<h4>什么证据会改变回答</h4><p>${esc(gap.answer_if_confirmed)} / ${esc(gap.answer_if_otherwise)}</p><p>${esc(gap.distinguishing_record)}</p>`;
+    }
+  }
+  if (node.tool === "read_event_records" && Array.isArray(args.picks)) {
+    for (const pick of args.picks) body += `<p>${esc(pick.evidence_expected_here)}</p>`;
+  }
   const serviceError = providerError(detail.error_type || detail.reason, node.sequence);
   const source = data.sources.find(s => s.version_id === (args.version_id || payload?.version_id));
   const lookup = node.tool === "find_saved_text";
