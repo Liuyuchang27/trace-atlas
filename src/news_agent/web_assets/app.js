@@ -107,7 +107,7 @@ function render() {
   $("#condition-label").hidden = data.workflow === "adaptive-event-map";
   $("#status").textContent = statusNames[data.status] || data.status; $("#status").className = `status ${data.status}`;
   const lastRoute = data.model_routes?.at(-1);
-  const stageNames = {scope_planning:"范围规划",gap_planning:"缺口规划",retrieval_selection:"检索读取",evidence_assessment:"证据判断",evidence_repair:"证据纠错",report_draft:"报告初稿",report_review:"报告核对",temporal_review:"日期与分项审核"};
+  const stageNames = {research_planning:"研究任务分解",publication_decision:"核对原表行列",scope_planning:"范围规划",gap_planning:"缺口规划",retrieval_selection:"检索读取",evidence_assessment:"证据判断",evidence_repair:"证据纠错",report_draft:"报告初稿",report_review:"报告核对",temporal_review:"日期与分项审核"};
   const effortNames = {low:"低强度思考",high:"高强度思考",max:"最高强度思考"};
   const thinkingLabel = lastRoute?.thinking === "enabled"
     ? effortNames[lastRoute.reasoning_effort] || "思考模式" : "普通模式";
@@ -166,7 +166,7 @@ function visibleNodes() {
 }
 const turningPoints = new Set([
   "adaptive_replan_triggered", "monthly_series_route_changed",
-  "monthly_series_calculated", "monthly_series_unresolved", "run_finished", "run_error",
+  "adaptive_batch_closed", "monthly_series_calculated", "monthly_series_unresolved", "run_finished", "run_error",
 ]);
 const compactChecks = new Set(["get_passage", "find_saved_text", "list_evidence", "close_gap_round"]);
 const shortRecheckStatus = new Map([
@@ -174,9 +174,64 @@ const shortRecheckStatus = new Map([
   ["Choose unread candidates or HTTPS pages within official domains.", "尚未选到可复核的页面"],
 ]);
 
+// Describe the operation the log actually records. Finding text is a different
+// step from recording a finding, even when both refer to the same source.
+const monthNames = "January February March April May June July August September October November December".split(" ");
+function lookupDescription(query, source) {
+  const period = /\b12[\s-]*(?:months?|mos?)\.?(?:\s*(?:ended|ending))?\b/i.test(query);
+  const cpi = /consumer price index|consumer prices|\bcpi(?:-u)?\b/i.test(source?.title || "");
+  if (period && cpi) {
+    const match = query.match(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b/i);
+    const month = match ? monthNames.findIndex(m => m.toLowerCase().startsWith(match[0].slice(0,3).toLowerCase())) + 1 : null;
+    const end = month ? month + "月" : "该月";
+    const adjustment = /\bunadjusted\b/i.test(query) ? "unadjusted 指未经季节调整。" : "";
+    return {title: "在原文里找" + (month ? month + "月的" : "") + "同比数据",
+      meaning: "这份物价报告用过去 12 个月的变化表示同比，也就是把" + end + "的价格指数和上年同月相比。" + adjustment};
+  }
+  if (period) return {title:"在原文里找十二个月统计期的说明", meaning:"这里的 12 months 指连续十二个月。具体指标和比较方式要看原表。"};
+  if (/\btable [A-Z0-9]+\b/i.test(query)) return {title:"在原文表格里找对应指标"};
+  return {title:"在已读网页里定位原文"};
+}
+
+function actionError(message) {
+  if (!message) return "";
+  const reason = String(message);
+  if (/Local lookup made no progress|already delivered|page was already selected/i.test(reason)) return "这次查找没有提供新的原文。";
+  if (/No unread selection/i.test(reason)) return "选中的网页都已经读过，本轮没有新增原文。";
+  if (/long passage requires excerpt_id/i.test(reason)) return "提交的原文过长，还需要标出支持这条发现的具体句子。";
+  if (/finish the active round/i.test(reason)) return "上一轮读取尚未结束，这次搜索没有发出。";
+  if (/Queries already ran/i.test(reason)) return "这组查询已经执行过，本次没有再次发起搜索。";
+  if (/month requires ISO month|date.*original|year.*original/i.test(reason)) return "原文与所提交日期的对应关系不足，这条记录没有写入。";
+  return shortRecheckStatus.get(reason) || "这一步遇到限制，具体原因可在技术记录中查看。";
+}
+
+function stepOutcome(node, result) {
+  if (!result) return "";
+  if (result.error || node.status === "blocked") return actionError(result.error) || "这一步未能完成。";
+  if (node.tool === "find_saved_text" && Array.isArray(result.passages)) {
+    return result.passages.length ? "从已保存的网页中取回 " + result.passages.length + " 段供核对。数值是否有依据，要看之后写入了哪条证据。" : "在这份网页里没有定位到相关段落。";
+  }
+  if (Array.isArray(result.results) || Array.isArray(result.candidate_ids)) {
+    const keys = result.candidate_ids || result.results.map(r => r.version_id || r.url || r.title);
+    return "找到 " + new Set(keys.filter(Boolean)).size + " 个候选来源，接下来可打开原文核对。";
+  }
+  if (Array.isArray(result.originals)) return "这批读取返回了 " + result.originals.length + " 条来源记录。";
+  if (Array.isArray(result.passages) || Array.isArray(result.passage_ids)) return "返回了 " + (result.passages || result.passage_ids).length + " 段原文。";
+  if (node.tool === "get_passage" && result.text) return "已重新打开指定的原文段落。";
+  if (Array.isArray(result.routes)) return result.routes.map(r => r.purpose + " · " + (r.error ? "遇阻" : (r.results || []).length + " 个候选")).join("；");
+  if (Array.isArray(result.lines)) return "已读到 " + result.lines.length + " 行原文，可继续定位表头、数值和日期依据。";
+  if (result.next_release_date) return "已确认所属期 " + result.month + "，下次计划发布于 " + result.next_release_date + "。";
+  if (Array.isArray(result.accepted)) return "已写入 " + result.accepted.length + " 项，" + result.rejected.length + " 项需要补证。" + result.accepted.map(r=>r[1]+" "+r[2]).join("，");
+  if (result.status === "not_reviewed") return "此次复审没有得到有效结论。";
+  if (result.finding_id) return "这条发现已写入调查记录，可沿引用核对原文。";
+  if (result.event_graph && node.tool === "begin_research_plan") return "已保存调查范围和要分别查证的问题。";
+  if (result.status === "decided" && node.tool === "replan_gap") return result.reason || "已经为这个缺口调整取证路线。";
+  return "";
+}
+
 function graphCards(nodes, cursor) {
   const seenPassages = new Set();
-  return nodes.map(node => {
+  const cards = nodes.map(node => {
     const settled = node.end_sequence != null && node.end_sequence <= cursor;
     const result = settled && node.status === "completed" ? node.details?.result : null;
     const originals = [result, ...(Array.isArray(result?.originals) ? result.originals : [])];
@@ -186,17 +241,20 @@ function graphCards(nodes, cursor) {
     passageIds.forEach(id => seenPassages.add(id));
     const event = node.details?.kind;
     const conclusion = node.tool === "record_current_result" && result?.outcome;
-    const plan = result && ["begin_investigation", "replan_gap"].includes(node.tool);
-    const milestone = node.kind === "task" || turningPoints.has(event) || conclusion || plan || novel.length > 0;
+    const plan = result && ["begin_research_plan","begin_investigation", "replan_gap"].includes(node.tool);
+    const milestone = (node.details?.batch || (node.tool === "read_evidence_batch" && node.status !== "blocked")) || node.kind === "task" || turningPoints.has(event) || conclusion || plan || novel.length > 0;
     const compact = !milestone && (node.kind === "verify" || node.kind === "source_check"
       || compactChecks.has(node.tool) || (node.kind === "read" && node.status === "blocked"));
     const category = node.label || kinds[node.kind] || node.kind;
-    const title = conclusion ? result.text || category
+    const args = node.details?.arguments || {};
+    const source = data.sources.find(s => s.version_id === args.version_id);
+    const title = node.tool === "find_saved_text" ? lookupDescription(args.query || "", source).title
+      : conclusion ? result.text || category
       : node.tool === "record_current_result" ? category : node.title;
     let status = node.public_reason || node.reason || statusNames[node.status] || node.status;
     if (node.status === "blocked") {
       status = providerError(node.details?.error_type || node.details?.reason, node.sequence)
-        || (settled ? node.details?.result?.error : null) || node.details?.reason || status;
+        || (settled ? actionError(node.details?.result?.error) : null) || node.details?.reason || status;
       if (compact) status = shortRecheckStatus.get(status) || status;
     }
     if (node.label === "连接重试") {
@@ -206,6 +264,19 @@ function graphCards(nodes, cursor) {
     const evidence = novel.length ? `新增 ${novel.length} 段原文` : "";
     return {node, category, title, status: evidence || status, milestone, compact};
   });
+  const visible = [];
+  for (const card of cards) {
+    const previous = visible.at(-1);
+    if (card.node.status === "blocked" && ["search_evidence_batch","search_monthly_records"].includes(card.node.tool)
+        && previous?.node.tool === card.node.tool && previous.node.status === "blocked"
+        && card.node.details?.result?.error === previous.node.details?.result?.error) {
+      card.aliases = [...(previous.aliases || []), previous.node.id];
+      card.title = `并行计划被退回 ${card.aliases.length + 1} 次`;
+      visible.pop();
+    }
+    visible.push(card);
+  }
+  return visible;
 }
 
 function layoutGraph(cards, width) {
@@ -218,16 +289,31 @@ function layoutGraph(cards, width) {
   function placeRow() {
     if (!row.length) return;
     const rowHeight = Math.max(...row.map(card => card.compact ? 44 : 62));
-    const rowWidth = row.length * minorWidth + (row.length - 1) * gap;
+    const itemWidth = row[0].branchWidth || minorWidth;
+    const rowWidth = row.length * itemWidth + (row.length - 1) * gap;
     row.forEach(({node, compact}, i) => {
       const height = compact ? 44 : 62;
-      positions.set(node.id, {x: (width - rowWidth) / 2 + i * (minorWidth + gap),
-        y: y + (rowHeight - height) / 2, width: minorWidth, height});
+      positions.set(node.id, {x: (width - rowWidth) / 2 + i * (itemWidth + gap),
+        y: y + (rowHeight - height) / 2, width: itemWidth, height});
     });
     y += rowHeight + 18;
     row = [];
   }
+  let branchLayer = null;
   for (const card of cards) {
+    const layer = card.node.provenance === "runtime_batch_target" ? card.node.sequence : null;
+    if (layer !== branchLayer) {
+      placeRow();
+      y += 12;
+      branchLayer = layer;
+    }
+    if (layer !== null) {
+      const lanes = Math.max(2, Math.min(4, Math.floor((width - 20) / 145)));
+      const branchWidth = (width - 40 - (lanes - 1) * gap) / lanes;
+      row.push({...card, branchWidth});
+      if (row.length === lanes) placeRow();
+      continue;
+    }
     if (card.milestone) {
       placeRow();
       positions.set(card.node.id, {x: (width - majorWidth) / 2, y, width: majorWidth, height: 108});
@@ -341,11 +427,12 @@ function lightFuse(path, target) {
   fuseFrame = requestAnimationFrame(advance);
 }
 
-function renderGraphEdges(positions, cursor, current, animate) {
+function renderGraphEdges(positions, cursor, current, animate, runningBranches, aliases) {
   const svg = $("#graph-edges"), present = new Set();
   let activePath = null;
   for (const edge of data.edges) {
-    if (edge.sequence > cursor || !positions.has(edge.from) || !positions.has(edge.to)) continue;
+    const start = aliases.get(edge.from) || edge.from, end = aliases.get(edge.to) || edge.to;
+    if (edge.sequence > cursor || start === end || !positions.has(start) || !positions.has(end)) continue;
     const key = JSON.stringify([edge.from, edge.to, edge.kind]);
     if (present.has(key)) continue;
     present.add(key);
@@ -358,8 +445,9 @@ function renderGraphEdges(positions, cursor, current, animate) {
     }
     const active = animate && edge.to === current && edge.kind === "sequence";
     if (active) activePath = path;
-    path.setAttribute("class", `edge ${edge.kind}${active ? " is-flowing" : ""}`);
-    path.setAttribute("d", edgePath(positions.get(edge.from), positions.get(edge.to)));
+    const branch = edge.kind === "explicit" && animate && runningBranches.has(end);
+    path.setAttribute("class", `edge ${edge.kind}${active ? " is-flowing" : ""}${branch ? " parallel-flow" : ""}`);
+    path.setAttribute("d", edgePath(positions.get(start), positions.get(end)));
   }
   for (const [key, path] of graphEdges) {
     if (present.has(key)) continue;
@@ -386,8 +474,8 @@ function renderGraph({follow = false} = {}) {
   }
   const cursor = replayValue ?? data.last_sequence;
   const nodes = visibleNodes();
-  const progress = node => node.end_sequence != null && node.end_sequence <= cursor
-    ? node.end_sequence : node.sequence;
+  const progress = node => [node.end_sequence, node.started_sequence, node.sequence]
+    .find(value => value != null && value <= cursor);
   const latest = nodes.reduce((last, node) => !last || progress(node) >= progress(last) ? node : last, null);
   const cards = graphCards(nodes, cursor);
   const {positions, height} = layoutGraph(cards, width);
@@ -401,9 +489,11 @@ function renderGraph({follow = false} = {}) {
   $("#graph-edges").setAttribute("viewBox", `0 0 ${width} ${height}`);
   renderGraphNodes(cards, positions, moving ? latest?.id : null,
     (moving || finishing) && !reducedMotion.matches);
-  renderGraphEdges(positions, cursor, latest?.id, moving || finishing);
+  const runningBranches = new Set(nodes.filter(n=>n.provenance==="runtime_batch_target" && n.status==="running").map(n=>n.id));
+  const aliases = new Map(cards.flatMap(c=>(c.aliases || []).map(id=>[id,c.node.id])));
+  renderGraphEdges(positions, cursor, latest?.id, moving || finishing, runningBranches, aliases);
   if (latest && (follow || ((live || finishing) && !newRun && nearEnd && !selectedNode))) {
-    const target = positions.get(latest.id);
+    const target = positions.get(aliases.get(latest.id) || latest.id);
     const bottom = target.y + target.height;
     if (target.y < viewport.scrollTop + 10 || bottom > viewport.scrollTop + viewport.clientHeight - 24) {
       viewport.scrollTo({top: Math.max(0, target.y - viewport.clientHeight / 3),
@@ -424,25 +514,39 @@ function inspectNode(id) {
   if (node.provenance === "model_reported") body += `<p>${esc(node.reason || args.reason || "未附加公开决策说明。")}</p><p>模型报告状态：${esc(statusNames[node.status] || node.status)}</p>`;
   else body += `<p>${esc(statusNames[node.status] || node.status)}${node.time ? " · "+esc(new Date(node.time).toLocaleTimeString("zh-CN",{timeZone:"Asia/Hong_Kong",hour12:false}))+" HKT" : ""}</p>`;
   const serviceError = providerError(detail.error_type || detail.reason, node.sequence);
-  if (serviceError) body += `<p>${esc(serviceError)}。下方保留 SDK 的原始异常名。</p>`;
-  if(node.public_reason) body += `<h4>模型公开的搜索目标</h4><p>${esc(node.public_reason)}</p>`;
-  if (node.url) body += `<p><a href="${esc(node.url)}" target="_blank" rel="noopener noreferrer">打开原始来源 ${icon("external")}</a></p>`;
-  body += `<h4>${node.provenance === "model_reported" ? "计划与关联" : "实际参数"}</h4><pre>${esc(JSON.stringify(args,null,2))}</pre>`;
-  if (payload) {
-    let summary = payload;
-    if (payload.results) summary = {results:payload.results};
-    else if (payload.passages) summary = {version_id:payload.version_id,returned_passages:payload.passages.length,total_passages:payload.total_passages,next_offset:payload.next_offset};
-    body += `<h4>观察结果</h4><pre>${esc(JSON.stringify(summary,null,2)).slice(0,6500)}</pre>`;
+  const source = data.sources.find(s => s.version_id === (args.version_id || payload?.version_id));
+  const lookup = node.tool === "find_saved_text";
+  const goal = detail.target?.target_question || node.public_reason || args.question || args.scope?.objective || args.reason;
+  if (goal && goal !== title && node.provenance !== "model_reported") body += `<h4>要回答的问题</h4><p>${esc(goal)}</p>`;
+  if (lookup && args.query) {
+    body += `<h4>在页内查找的词</h4><p><q lang="en">${esc(args.query)}</q></p>`;
+    const explanation = lookupDescription(args.query, source).meaning;
+    if (explanation) body += `<p>${esc(explanation)}</p>`;
+  } else if ((args.query || detail.target?.query) && node.kind === "search") {
+    body += `<h4>发给搜索引擎的词</h4><p>${esc(args.query || detail.target.query)}</p>`;
   }
-  if (node.requests?.length) body += `<h4>服务请求</h4>${node.requests.filter(r => r.sequence <= (replayValue ?? data.last_sequence)).map(r=>`<p>${esc(r.operation)} · ${r.result && r.result.sequence <= (replayValue ?? data.last_sequence) ? (r.result.usage_known ? esc(r.result.credits)+" credits" : "用量未知") : "请求已派发"}</p>`).join("")}`;
-  const pids = node.passage_ids || args.passage_ids || [];
-  if (pids.length && payload !== null) body += `<h4>原文指针</h4>${pids.slice(0,8).map(citeButton).join(" ")}`;
+  if (detail.batch) body += `<p>${esc(detail.batch.targets)} 个取证目标 · 并行上限 ${esc(detail.batch.concurrency)}</p>`;
+  const statement = args.finding?.assertion || args.assertion;
+  if (typeof statement === "string") body += `<h4>提交的发现</h4><p>${esc(statement)}</p>`;
+  const outcome = serviceError || stepOutcome(node, payload);
+  if (outcome || pending) body += `<h4>这一步的结果</h4><p>${esc(outcome || "正在等待返回。")}</p>`;
+  if (node.url) body += `<h4>原始来源</h4><a href="${esc(node.url)}" target="_blank" rel="noopener noreferrer">${esc(source?.title || payload?.title || "打开原网页")} ${icon("external")}</a>`;
+  // Link only the passages this operation returned. Payloads can also contain
+  // prior graph state and references unrelated to this lookup.
+  const pids = lookup ? (payload?.passages || []).map(p => p.passage_id).filter(Boolean) : node.passage_ids || args.passage_ids || [];
+  if (pids.length && payload !== null) body += `<h4>相关原文</h4>${pids.slice(0,8).map((pid,i)=>citeButton(pid, lookup ? "片段 " + (i+1) : null)).join(" ")}`;
+  const requests = (node.requests || []).filter(r => r.sequence <= cursor).map(r => ({
+    operation:r.operation, ...(r.result?.sequence <= cursor ? {result:r.result} : {})
+  }));
+  const technical = detail.arguments || detail.result ? {parameters:detail.arguments || {}, ...(requests.length ? {requests} : {}), ...(payload ? {result:payload} : {})} : args;
+  const raw = JSON.stringify(technical,null,2) || "";
+  body += `<details class="node-technical"><summary>技术记录</summary><pre>${esc(raw.length > 9000 ? raw.slice(0,9000) + "\n…（已截取）" : raw)}</pre></details>`;
   $("#inspector").innerHTML = body;
   document.querySelectorAll(".graph-node").forEach(n => n.classList.toggle("selected",n.dataset.node===id));
 }
-function citeButton(pid) {
+function citeButton(pid, label) {
   const sourceIndex = data.sources.findIndex(s => s.passages.some(p => p.passage_id === pid));
-  return `<button class="citation" data-passage="${esc(pid)}" title="${esc(pid)}">${sourceIndex < 0 ? "未知引用" : "来源 "+String(sourceIndex+1).padStart(2,"0")} ${icon("external")}</button>`;
+  return `<button class="citation" data-passage="${esc(pid)}" title="${esc(pid)}">${typeof label === "string" ? esc(label) : sourceIndex < 0 ? "未知引用" : "来源 "+String(sourceIndex+1).padStart(2,"0")} ${icon("external")}</button>`;
 }
 function inlineMarkdown(text) {
   return esc(text).replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/`([^`]+)`/g,"<code>$1</code>").replace(/\[(p-[a-f0-9]{16})\]/g,(_,pid)=>citeButton(pid)).replace(/\b(ef-[a-f0-9]{16})\b/g,(_,fid)=>`<button class="citation" data-finding="${fid}">地图节点 ↗</button>`);
@@ -624,6 +728,23 @@ const seenFindings = new Set();
 let selectedFinding = null;
 let lastAtlasSignature = "";
 function eventDate(span) {return span?.start ? span.start + (span.end && span.end!==span.start ? " → " + span.end : "") : "日期未明确";}
+function renderNodeGaps(gaps, parts) {
+  const months = new Map(), other = [];
+  for (const gap of gaps) {
+    if (!gap.reference_month) { other.push(gap); continue; }
+    if (!months.has(gap.reference_month)) months.set(gap.reference_month, []);
+    months.get(gap.reference_month).push(gap);
+  }
+  const monthly = [...months].sort(([a],[b])=>a.localeCompare(b)).map(([month, rows])=>{
+    const labels = rows.map(g=>{
+      const part = parts.find(p=>p.part_id===g.question_part_id);
+      return esc(part?.monthly_series?.unit || part?.question || g.title);
+    });
+    const attempts = Math.max(...rows.map(g=>g.attempts || 0));
+    return `<div class="gap-leaf"><span>${esc(month)} · ${labels.join(" / ")}<small class="part-evidence">${attempts ? "已尝试检索，待原文覆盖" : "尚未派发检索"}</small></span></div>`;
+  }).join("");
+  return monthly + other.map(g=>`<div class="gap-leaf">${icon("unknown")}<span>${esc(gapTitle(g))} · ${g.status==="stalled"?"暂时停滞":"仍开放"} · 已检索 ${g.attempts||0} 轮</span></div>`).join("");
+}
 function renderEvents() {
   const view=data.event_view || {}, units=view.event_units || [], nodes=view.nodes || [];
   const signature=JSON.stringify([data.run_id,view,data.gaps,data.status,data.nodes.at(-1)]);
@@ -636,10 +757,19 @@ function renderEvents() {
   const panels=nodes.map(node=>{
     const findings=units.filter(u=>u.question_node_id===node.node_id).sort((a,b)=>(a.finding.event_time.start || "9999").localeCompare(b.finding.event_time.start || "9999"));
     const gaps=(data.gaps||[]).filter(g=>g.node_id===node.node_id && g.status!=="resolved");
-    return `<section class="event-branch ${node.importance==="minor" ? "minor-branch" : ""}"><div class="branch-root"><span class="branch-flame">${icon("flame")}</span><div><small>${node.importance==="major"?"关键问题":"补充节点"} · ${esc(evidenceStates[node.status]||node.status)}</small><h3>${esc(node.title)}</h3><p>${esc(node.importance_reason||"")}</p></div></div><div class="question-parts">${(node.part_status||[]).map(p=>`<span class="part ${p.status==="model_assessed_answered"?"covered":"open"}">${esc(p.question)} · ${p.status==="model_assessed_answered"?"有对应原文":p.status==="disputed"?"争议":"待补证"}</span>`).join("")}</div><div class="event-spine">${findings.map(u=>{
+    const parts=node.part_status || [];
+    const partTitles=new Map(parts.map(part=>[part.part_id,part.question]));
+    const planCards=parts.map(part=>{
+      const covered=part.status==="model_assessed_answered";
+      const prerequisites=(part.depends_on||[]).map(id=>partTitles.get(id)||id);
+      const evidence=part.evidence_needed ? `<span class="part-evidence">${esc(part.evidence_needed)}</span>` : "";
+      const dependencies=prerequisites.length ? `<span class="part-evidence">依赖 ${esc(prerequisites.join("、"))}</span>` : "";
+      return `<div class="part ${covered?"covered":"open"}">${esc(part.question)} · ${covered?"有对应原文":part.status==="disputed"?"争议":"待补证"}${evidence}${dependencies}</div>`;
+    }).join("");
+    return `<section class="event-branch ${node.importance==="minor" ? "minor-branch" : ""}"><div class="branch-root"><span class="branch-flame">${icon("flame")}</span><div><small>${node.importance==="major"?"关键问题":"补充节点"} · ${esc(evidenceStates[node.status]||node.status)}</small><h3>${esc(node.title)}</h3><p>${esc(node.importance_reason||"")}</p></div></div><div class="question-parts">${planCards}</div><div class="event-spine">${findings.map(u=>{
       const fresh=!seenFindings.has(data.run_id+u.event_unit_id);seenFindings.add(data.run_id+u.event_unit_id);
       return `<button class="event-card ${fresh?"arrive":""} ${u.finding.stance==="contradicts"?"opposed":""}" data-finding="${esc(u.event_unit_id)}"><span class="event-pin">${icon("flame")}</span><time>${esc(eventDate(u.finding.event_time))}</time><small>${esc(findingNames[u.finding.occurrence])}${u.finding.stance==="contradicts"?" · 相反证据":""}</small><p>${esc(u.finding.assertion)}</p><span class="event-card-foot">${new Set(u.references.map(r=>r.version_id)).size} 个来源记录 · 查看依据 ${icon("arrow")}</span></button>`;
-    }).join("") || '<p class="unknown-card">尚无成功写回的原文发现；已经搜索或读取不代表问题已回答。</p>'}</div>${gaps.map(g=>`<div class="gap-leaf">${icon("unknown")}<span>${esc(gapTitle(g))} · ${g.status==="stalled"?"暂时停滞":"仍开放"} · 已检索 ${g.attempts||0} 轮</span></div>`).join("")}</section>`;
+    }).join("") || '<p class="unknown-card">尚无成功写回的原文发现；已经搜索或读取不代表问题已回答。</p>'}</div>${renderNodeGaps(gaps,parts)}</section>`;
   }).join("");
   const relations=(view.relations||[]).map(r=>`<p>${esc(nodes.find(n=>n.node_id===r.first)?.title||r.first)} → ${esc(r.relation)} → ${esc(nodes.find(n=>n.node_id===r.second)?.title||r.second)}<br><small>${esc(r.reason)} · 模型提出的关系，按引用判断</small></p>`).join("");
   $("#events-panel").innerHTML=`<div class="section-heading"><div><h2>事件地图</h2><p>每个节点是一条保存的发现。点击展开依据、未知和对应调查动作。</p></div><button class="quiet-button" data-expand-minor aria-expanded="false">展开次要节点</button></div>${ribbon}${(data.gaps||[]).filter(g=>!g.node_id&&g.status!=="resolved").map(g=>`<p class="gap-leaf">${esc(gapTitle(g))} · ${esc(g.status)}</p>`).join("")}<div class="atlas-layout"><div class="event-atlas">${panels}${relations?`<section class="event-relations"><h3>已记录的事件关系</h3>${relations}</section>`:""}</div><aside id="event-inspector" class="inspector"><h3>选择一个事件节点</h3><p>查看这条发现的原文、事件日期、来源说明与实际写入动作。</p><p>地图显示当前累计状态；调查过程页可回放动作顺序。</p></aside></div><p class="footnote">${esc(view.notice)} · 不同网页不自动等于独立来源；相邻节点不自动构成因果。</p>`;
