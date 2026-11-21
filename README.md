@@ -39,6 +39,7 @@ For questions such as “How many copies did the newest release sell?”, check 
 
 ## Recent improvements
 
+- For event follow-ups, the agent drafts an answer after each batch of originals. Open a coverage check in the investigation view to see what it can already answer and which missing fact could change the conclusion. Event reports group sources across the conclusion, background, turning point, and outcome.
 - For recent-fact questions, the agent checks the publisher and its disclosures. For sales questions it can look back to the previous reporting period and read the new candidates. The report leads with the available data, labels third-party preorder estimates, and states the investigation cutoff and unresolved questions.
 - For monthly trends, the agent tracks each requested month separately and can switch to a historical table when a summary page leaves gaps. The report links the original passages behind the trend chart.
 - The investigation can replan an evidence gap, try a different source or date range, and continue with other questions when one gap stalls. The report export preserves citations to saved passages.
