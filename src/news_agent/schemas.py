@@ -81,6 +81,7 @@ class BudgetConfig(StrictModel):
     reserve_seconds: float = Field(default=120, ge=0)
     max_output_tokens: int = Field(default=1500, ge=1)
     planning_output_tokens: int | None = Field(default=None, ge=1, exclude_if=lambda v: v is None)
+    review_output_tokens: int | None = Field(default=None, ge=1, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def valid_reserves(self):

@@ -44,6 +44,9 @@ def output_limit(stage, config):
     cap = config.max_output_tokens
     if stage == "research_planning" and config.planning_output_tokens is not None:
         cap = config.planning_output_tokens
+    elif stage in {"report_review", "temporal_review", "publication_decision", "event_coverage"}:
+        if config.review_output_tokens is not None:
+            cap = config.review_output_tokens
     return min(cap, OUTPUT_TARGETS[stage])
 
 

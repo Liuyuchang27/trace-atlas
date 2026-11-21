@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from types import SimpleNamespace
 
@@ -252,6 +253,8 @@ class CoreEvidenceContext(EvidenceContext):
             packet["public_plan"] = [
                 {"step_id": s["step_id"], "status": s["status"]} for s in packet["public_plan"]
             ]
+        if adaptive:
+            self._bound_adaptive_index(packet)
         if not fits():
             raise BudgetExceeded("evidence_context_index_limit")
         claimed = {pid for c in e.claims for pid in c.passage_ids}
@@ -386,10 +389,73 @@ class CoreEvidenceContext(EvidenceContext):
             raise BudgetExceeded("evidence_context_index_limit")
         return packet
 
+    def _bound_adaptive_index(self, packet):
+        """Thin recoverable summaries before they crowd delivered originals out.
+
+        The task and source rules are never shortened. This is a view of durable
+        ledgers, not a mutation of research state or an increased context allowance.
+        """
+        target = self.limit - min(1600, self.limit // 3)
+        if byte_size(packet) <= target:
+            return
+        # Some summaries retain nested ledger objects; never edit those in place.
+        for key in (
+            "event_graph",
+            "adaptive_investigation",
+            "question_state",
+            "research_constraints",
+        ):
+            if key in packet:
+                packet[key] = copy.deepcopy(packet[key])
+        omitted = packet["inventory"].setdefault("context_metadata_omitted", {})
+        packet["rules"] += (
+            " Context metadata is a partial view; omitted entries remain in the saved "
+            "research ledgers. Omitted questions are not answered and omitted sources "
+            "are not unread."
+        )
+        graph = packet["event_graph"]
+        for node in graph["nodes"]:
+            for part in node.get("part_status", []):
+                # Keep actionable IDs and conservative status, not duplicated prose.
+                for key in list(part):
+                    if key not in {"part_id", "status", "required_occurrence", "requires_date"}:
+                        part.pop(key)
+                        omitted["part_details"] = omitted.get("part_details", 0) + 1
+        collections = {
+            key: packet[key]
+            for key in (
+                "public_plan",
+                "recent_actions",
+                "unread_candidates",
+                "source_link_leads",
+                "claims",
+                "question_state",
+            )
+            if key in packet
+        }
+        collections.update(
+            {
+                "saved_source_ids": packet["inventory"]["saved_source_ids"],
+                "node_ids": graph["node_ids"],
+                "nodes": graph["nodes"],
+            }
+        )
+        if "adaptive_investigation" in packet:
+            collections["queue"] = packet["adaptive_investigation"]["queue"]
+        if "research_constraints" in packet:
+            collections["completion_dates"] = packet["research_constraints"]["completion_dates"]
+        # Remove the largest tail first, preserving the existing focus ordering.
+        # Each iteration accounts for omission counters and the final packet ID.
+        while byte_size(packet) > target:
+            choices = [(byte_size(rows[-1]), key) for key, rows in collections.items() if rows]
+            if not choices:
+                break
+            _, key = max(choices)
+            collections[key].pop()
+            omitted[key] = omitted.get(key, 0) + 1
+
     def report_packet(self):
         """Report evidence has its own bounded view, independent of retrieval recency."""
-        import copy
-
         e = self.evidence
         if not hasattr(e, "adaptive"):
             return self.packet([])
