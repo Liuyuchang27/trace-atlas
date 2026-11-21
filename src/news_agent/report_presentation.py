@@ -4,8 +4,8 @@ from html import escape
 from itertools import groupby
 from urllib.parse import urlsplit
 
-from .current_check import checked_sources, related_preorder_notes, result_view
-from .current_report import synthesize_notes
+from .current_check import checked_sources, report_preorder_notes, written_view
+from .edition import series_summary
 from .event_graph import Finding
 from .event_report import precision_issue, resolved_temporal_candidate
 from .temporal_review import coverage_view, digest
@@ -20,10 +20,12 @@ def verified_review(review, graph):
 
 
 def current_brief(state, documents, passages, draft=None):
+    current = written_view(state, draft)
     return {
-        "current": result_view(state),
+        "current": current,
+        "sales_question": state.get("sales_question", False),
         "sources": checked_sources(state, documents, passages),
-        "preorder_notes": synthesize_notes(related_preorder_notes(state), draft),
+        "preorder_notes": report_preorder_notes(state, draft),
         "previous_period": state.get("previous_period", {}),
         "searches": [
             {
@@ -77,6 +79,7 @@ def report_brief(snapshot, review, *, repeat_review_incomplete=False):
             "node_id": node_id,
             "part_id": finding.get("question_part_id"),
             "text": finding["assertion"],
+            "missing_explanation": finding.get("missing_explanation"),
             "date": finding["event_time"].get("start"),
             "end": finding["event_time"].get("end"),
             "valid_time": unit["time_labels"]["applicability"],
@@ -107,6 +110,12 @@ def report_brief(snapshot, review, *, repeat_review_incomplete=False):
         for r in snapshot.get("adaptive", {}).get("rounds", [])
         if r.get("reference_month") and r.get("status") == "closed"
     }
+    searched_months.update(
+        (row["node_id"], target["question_part_id"], target["reference_month"])
+        for row in snapshot.get("adaptive", {}).get("rounds", [])
+        for target in row.get("batch_targets", [])
+        if target.get("reference_month") and target["status"] == "returned"
+    )
     for node in snapshot["event_view"]["nodes"]:
         for part in node.get("part_status", []):
             part_id = part["part_id"]
@@ -114,6 +123,12 @@ def report_brief(snapshot, review, *, repeat_review_incomplete=False):
                 points = [
                     {
                         "month": month,
+                        "missing_explanation": visible.get(point.get("finding_id"), {}).get(
+                            "missing_explanation"
+                        ),
+                        "unavailable": bool(
+                            point.get("unavailable") and point.get("finding_id") in visible
+                        ),
                         "searched": (node["node_id"], part_id, month) in searched_months,
                         "value": point["value"] if point.get("finding_id") in visible else None,
                         "passages": visible[point["finding_id"]]["passages"]
@@ -142,6 +157,11 @@ def report_brief(snapshot, review, *, repeat_review_incomplete=False):
                             "question": part["question"],
                             "unit": part["monthly_series"]["unit"],
                             "points": points,
+                            "summary": series_summary(
+                                plan["months"],
+                                {p["month"]: p for p in points},
+                                part["monthly_series"]["unit"],
+                            ),
                             **(
                                 {"source": receipt["url"], "publisher": receipt["publisher"]}
                                 if receipt
@@ -232,7 +252,15 @@ def report_brief(snapshot, review, *, repeat_review_incomplete=False):
             )
             if pid not in item["cited"]:
                 item["cited"].append(pid)
+    edition = snapshot.get("adaptive", {}).get("publication_research", {}).get("anchor") or {}
+    schedule = edition.get("schedule_passages", [])
+    edition_view = (
+        {**edition, "source_url": source_passages[schedule[0]][0]["url"]}
+        if charts and schedule and all(pid in source_passages for pid in schedule)
+        else None
+    )
     return {
+        "edition": edition_view,
         "answers": answers,
         "charts": charts,
         "dated": dated,
@@ -274,6 +302,15 @@ def render_brief(brief, *, standalone=False):
         return render_current(brief, current, cite)
 
     output = ['<div class="brief">']
+    if edition := brief.get("edition"):
+        publication = (
+            f"本期于 {escape(edition['published'])} 发布。" if edition.get("published") else ""
+        )
+        citations = " ".join(cite(pid, "下期预告原文") for pid in edition["schedule_passages"])
+        output.append(
+            f"<section><h2>最新已核实到 {escape(edition['month'])}</h2>"
+            f"<p>{publication}下一期计划于 {escape(edition['next_release_date'])} 发布。 {citations}</p></section>"
+        )
     if brief["omitted"] and not brief["answers"] and not brief["charts"]:
         output.append("<section><h2>核心结论未确认</h2><ul>")
         output.extend(f"<li>{escape(question)}</li>" for question in brief["omitted"])
@@ -315,14 +352,27 @@ def render_brief(brief, *, standalone=False):
         output.append(
             f"<section><h2>{escape(chart['question'])}</h2>"
             f'<p class="muted">单位 {escape(chart["unit"])}'
-            f' · 按数据所属月排列</p>{method}<div class="brief-series">'
+            f' · 按数据所属月排列</p><p>{escape(chart.get("summary", ""))}</p>{method}<div class="brief-series">'
         )
         for point in chart["points"]:
             value = point["value"]
             title = (
-                ("已搜待补证" if point["searched"] else "未按月检索")
+                (
+                    (
+                        "官方未公布"
+                        + (
+                            " · " + point["missing_explanation"]
+                            if point.get("missing_explanation")
+                            else ""
+                        )
+                    )
+                    if point.get("unavailable")
+                    else "已搜待补证"
+                    if point["searched"]
+                    else "待核实"
+                )
                 if value is None
-                else format(value, "+,d")
+                else format(value, "+,")
                 if value
                 else "0"
             )
@@ -343,7 +393,7 @@ def render_brief(brief, *, standalone=False):
             output.append(
                 f'<div class="series-row"><time>{escape(point["month"])}</time>'
                 f'<span class="series-track" aria-hidden="true">{bar}</span>'
-                f"<strong{value_class}>{title}</strong>"
+                f"<strong{value_class}>{escape(str(title))}</strong>"
                 f'<span class="series-sources">{links}</span></div>'
             )
         output.append("</div></section>")
@@ -408,6 +458,13 @@ def render_current(brief, current, cite):
     if not confirmed:
         conclusion.append(f'<p class="muted">核查截至 {escape(current["cutoff_label"])}</p>')
     conclusion.append(f"<p>{escape(current['text'])}</p>")
+    if current.get("lead_source"):
+        attribution = current["lead_source"] + (
+            " · 公告日期 " + current["lead_published"] if current.get("lead_published") else ""
+        )
+        conclusion.append(f'<p class="muted">{escape(attribution)}</p>')
+    for pid in current.get("lead_ids", []):
+        conclusion.append(cite(pid))
     if current["record_on"]:
         conclusion.append(f"<p>原始记录日期 {escape(current['record_on'])}</p>")
     if cutoff := current.get("data_through"):
@@ -418,6 +475,12 @@ def render_current(brief, current, cite):
         conclusion.append(f'<p class="muted">核查截至 {escape(current["cutoff_label"])}</p>')
     conclusion.append("</section>")
     findings = []
+    for point in current.get("other_findings", []):
+        attribution = "官方披露" if point["official"] else "第三方估算"
+        links = " ".join(cite(pid) for pid in point["citations"])
+        findings.append(
+            f"<section><h2>{attribution} · {escape(point['source'])}</h2><p>{escape(point['summary'])} {links}</p></section>"
+        )
     if notes := brief.get("preorder_notes"):
         findings.append("<section><h2>已查到的预购信息</h2>")
         for note in notes:
@@ -433,7 +496,7 @@ def render_current(brief, current, cite):
             f"<section><p>官方 {escape(release['day'])} 公告确认已发售。 {refs}</p></section>"
         )
     output = ['<div class="brief">']
-    output.extend(conclusion + findings if confirmed else findings + conclusion)
+    output.extend(conclusion + findings)
     if brief["sources"]:
         output.append("<section><h2>已读取的来源</h2><ul>")
         for source in brief["sources"]:

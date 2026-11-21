@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from . import answer_contract, event_report, temporal_review
 from .budget import BudgetExceeded
+from .current_report import ANSWER_FIRST
 from .storage import read_json
 
 REVISION_PROMPT = """REPORT_REVISION:
@@ -304,7 +305,7 @@ async def revise_report(draft, task, context, investigation, model, budget, conf
                 SystemMessage(
                     answer_contract.PROMPT
                     if structured
-                    else event_report.PROMPT
+                    else ANSWER_FIRST + "\n" + event_report.PROMPT
                     if adaptive_report
                     else REVISION_PROMPT
                     + (CORE_DATE_REVIEW if hasattr(context, "archive_packet") else "")

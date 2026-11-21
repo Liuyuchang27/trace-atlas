@@ -1,4 +1,4 @@
-"""P2 serial, metered investigation rounds over the versioned event graph."""
+"""Metered investigation rounds over the versioned event graph."""
 
 from __future__ import annotations
 
@@ -15,6 +15,20 @@ from pydantic import model_validator
 from .event_graph import OriginalRef, TimeSpan, digest
 from .gap_replan import apply_replan, pending_replan, queue_replan, route_change
 from .monthly_series import explicit_search_months
+from .research_batch import (
+    MAX_CONCURRENT_SEARCHES,
+    SCOPE_PLAN,
+    attempted_search,
+    batch_can_read,
+    batch_outcomes,
+    batch_tool,
+    close_batch,
+    month_query,
+    pending_targets,
+    recover_batch,
+    search_fingerprint,
+    target_receipt,
+)
 from .resource_control import execution_limits
 from .retrieval import public_url
 from .storage import read_json
@@ -159,8 +173,11 @@ class AdaptiveInvestigation:
         self.store = self.evidence.store
         self.path = self.store.root / "adaptive_investigation.json"
         self.search = None
+        self.reader = None
         self.current_check = None
+        self.editions = None
         self.monthly_history_enabled = False
+        self.parallel_search_enabled = False
         if self.path.exists():
             self.data = read_json(self.path)
             if self.data.get("sha256") != digest(
@@ -174,13 +191,18 @@ class AdaptiveInvestigation:
                 raise ValueError("adaptive state policy/task changed")
             # An interrupted network action is not an invitation to retry and rebill.
             for r in self.data["rounds"]:
-                if r["status"] == "dispatching":
+                if r["status"] == "dispatching" and r.get("batch_targets"):
+                    recover_batch(r)
+                elif r["status"] == "dispatching":
                     r.update(
                         status="interrupted_unknown", close_reason="search result not committed"
                     )
                 for a in r["actions"]:
                     if a["status"] == "dispatching":
                         a["status"] = "interrupted_unknown"
+                for read in r.get("batch_reads", []):
+                    if read["status"] == "dispatching":
+                        read["status"] = "interrupted_unknown"
         else:
             self.data = {
                 "version": policy()["version"],
@@ -223,9 +245,29 @@ class AdaptiveInvestigation:
                 if (
                     (coverage := part.get("month_coverage")) is not None
                     and not coverage["anchor"]
+                    and (
+                        not part["monthly_series"].get("publication")
+                        or part["monthly_series"].get("adjacent_level_changes")
+                    )
+                    and not any(
+                        token in part["monthly_series"]["unit"].lower()
+                        for token in ("%", "％", "percent", "百分")
+                    )
                     and (nid, part["part_id"]) not in attempted
                 ):
                     return nid, part
+        return None
+
+    def initial_publication(self):
+        if self.active() or self.temporal_repair.data["active"]:
+            return None
+        for gap in self.data["gaps"].values():
+            if gap["status"] != "open" or gap["attempts"] or not gap.get("question_part_id"):
+                continue
+            for part in self.graph.data["nodes"][gap["node_id"]].get("question_parts", []):
+                spec = part.get("monthly_series") or {}
+                if spec.get("publication") and spec["anchor_part_id"] == gap["question_part_id"]:
+                    return gap, spec
         return None
 
     def monthly_round(self):
@@ -324,6 +366,7 @@ class AdaptiveInvestigation:
                 needs.append((nid, kind, importance, title, {}))
                 continue
             parts = self.graph.node_view(nid)["part_status"]
+            answered = {p["part_id"] for p in parts if p["status"] == "model_assessed_answered"}
             anchors_needed = {
                 part["monthly_series"]["anchor_part_id"]
                 for part in parts
@@ -334,6 +377,13 @@ class AdaptiveInvestigation:
                 if part["status"] == "model_assessed_answered" and part_id not in anchors_needed:
                     continue
                 scope = {"question_part_id": part_id}
+                if part.get("evidence_needed"):
+                    scope["evidence_needed"] = part["evidence_needed"]
+                if part.get("depends_on"):
+                    scope["depends_on"] = part["depends_on"]
+                    scope["blocked_by"] = [pid for pid in part["depends_on"] if pid not in answered]
+                if (spec := part.get("monthly_series")) and spec.get("publication"):
+                    scope.update(publication=spec["publication"], domain=spec.get("domain"))
                 series = part.get("month_coverage")
                 if series is None or (series["anchor"] and not series["missing"]):
                     needs.append((nid, kind, importance, part["question"], scope))
@@ -370,6 +420,8 @@ class AdaptiveInvestigation:
                     **scope,
                 }
             else:
+                if "blocked_by" in scope:
+                    old["blocked_by"] = scope["blocked_by"]
                 if old["status"] == "resolved" or (
                     old["status"] == "stalled"
                     and not scope
@@ -468,7 +520,11 @@ class AdaptiveInvestigation:
             "chronology_unanchored": 5,
         }
         queue = sorted(
-            (r for r in self.data["gaps"].values() if r["status"] == "open"),
+            (
+                r
+                for r in self.data["gaps"].values()
+                if r["status"] == "open" and not r.get("blocked_by")
+            ),
             key=lambda r: (
                 r["importance"] != "major",
                 1 if r.get("question_part_id") else rank[r["kind"]],
@@ -490,6 +546,17 @@ class AdaptiveInvestigation:
                 s: sum(g["status"] == s for g in self.data["gaps"].values())
                 for s in ["open", "stalled", "resolved"]
             },
+            **(
+                {"waiting_for_prerequisites": waiting}
+                if (
+                    waiting := [
+                        {k: r[k] for k in ("gap_id", "question_part_id", "blocked_by")}
+                        for r in self.data["gaps"].values()
+                        if r["status"] == "open" and r.get("blocked_by")
+                    ]
+                )
+                else {}
+            ),
             "active_round": {
                 k: active.get(k)
                 for k in [
@@ -573,6 +640,8 @@ class AdaptiveInvestigation:
                     "question_part_id",
                     "reference_month",
                     "parent_gap_id",
+                    "evidence_needed",
+                    "depends_on",
                 ]
                 if k in g
             }
@@ -586,6 +655,8 @@ class AdaptiveInvestigation:
         info.pop("gap_ids")
         active = info["active_round"]
         if active:
+            if targets := self.active().get("batch_targets"):
+                active["batch_targets"] = [target_receipt(t) for t in targets]
             active["actions"] = [
                 {k: a[k] for k in ["name", "status", "passage_ids", "error"] if k in a}
                 for a in active["actions"][-2:]
@@ -600,7 +671,9 @@ class AdaptiveInvestigation:
             (
                 r
                 for r in reversed(self.data["rounds"])
-                if r["node_id"] == node_id and not r.get("reference_month")
+                if r["node_id"] == node_id
+                and not r.get("reference_month")
+                and not r.get("batch_targets")
             ),
             None,
         )
@@ -736,6 +809,8 @@ class AdaptiveInvestigation:
         gap = self.data["gaps"].get(gap_id)
         if not gap or gap["status"] != "open":
             raise ValueError("select an open gap from inspect_investigation")
+        if gap.get("blocked_by"):
+            raise ValueError("Resolve the declared prerequisite before searching this gap")
         scoped_part = gap.get("question_part_id")
         reference_month = gap.get("reference_month")
         siblings = [
@@ -743,6 +818,7 @@ class AdaptiveInvestigation:
             for g in self.data["gaps"].values()
             if g["node_id"] == gap["node_id"]
             and g["status"] == "open"
+            and not g.get("blocked_by")
             and (g.get("question_part_id") or g.get("parent_gap_id"))
         ]
         if not self.temporal_repair.data["active"]:
@@ -817,19 +893,11 @@ class AdaptiveInvestigation:
             if window.bounds()
             else ""
         )
-        if reference_month:
-            year, month = reference_month.split("-")
-            suffix = (
-                f" [reference month: {calendar.month_name[int(month)]} {year}; {reference_month}]"
-            )
-        effective_query = query.strip() + suffix
-        fingerprint = digest(
-            [
-                re.sub(r"\s+", " ", effective_query.casefold()),
-                sorted(d.strip().casefold() for d in include_domains or []),
-            ]
+        effective_query = (
+            month_query(query, reference_month) if reference_month else query.strip() + suffix
         )
-        if any(r["fingerprint"] == fingerprint for r in self.data["rounds"]):
+        fingerprint = search_fingerprint(effective_query, include_domains)
+        if attempted_search(self.data["rounds"], fingerprint):
             raise ValueError(
                 "identical/uncertain search already attempted; choose a different lead"
             )
@@ -1145,6 +1213,16 @@ class AdaptiveInvestigation:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
+        if call["name"] in {"search_evidence_batch", "search_monthly_records"} and payload.get(
+            "error"
+        ):
+            count = len(self.data["rounds"])
+            prior = self.data.get("batch_rejection", {})
+            attempts = prior.get("attempts", 0) + 1 if prior.get("round_count") == count else 1
+            self.data["batch_rejection"] = {"round_count": count, "attempts": attempts}
+            if attempts >= 2:
+                self.data["batch_fallback_round_count"] = count
+            self.save()
         if self.temporal_repair.data["active"]:
             self.temporal_repair.record_feedback(call, payload)
             self.temporal_repair.observe_context(payload)
@@ -1282,6 +1360,8 @@ class AdaptiveInvestigation:
         r = self.active()
         if not r or not reason.strip() or len(reason) > 500:
             raise ValueError("choose an active round and give a concise observed outcome")
+        if r.get("batch_targets"):
+            return close_batch(self, r, reason)
         gap = self.data["gaps"][r["gap_id"]]
         part_id = r.get("question_part_id")
         after = self.measure(gap, part_id)
@@ -1350,6 +1430,8 @@ class AdaptiveInvestigation:
 
     def surface(self, tools):
         """Expose the current phase, keeping unused schemas out of the paid request."""
+        if self.editions and self.editions.parts():
+            return self.editions.surface(tools)
         if self.current_check:
             return self.current_check.surface(tools)
         if self.write_recovery.pending():
@@ -1391,11 +1473,24 @@ class AdaptiveInvestigation:
             return [t for t in tools if t.name == "select_monthly_series"]
         if self.pending_series():
             return [t for t in tools if t.name == "collect_monthly_history"]
+        if self.initial_publication():
+            return [t for t in tools if t.name == "locate_latest_edition"]
         if self.monthly_handoff():
             return [t for t in tools if t.name in {"append_event_finding", "close_gap_round"}]
+        if targets := pending_targets(self):
+            name = (
+                "search_planned_months"
+                if all(g.get("publication") and not g["attempts"] for g in targets)
+                else "search_monthly_records"
+                if any(g.get("reference_month") for g in targets)
+                else "search_evidence_batch"
+            )
+            return [t for t in tools if t.name == name]
         base = {"inspect_event_graph"}
         if not self.graph.data["scope_history"] and not self.graph.data["nodes"]:
-            names = {"begin_investigation"}
+            names = (
+                {"begin_research_plan"} if self.parallel_search_enabled else {"begin_investigation"}
+            )
         elif not self.graph.data["nodes"]:
             names = base | {"record_event_finding"}
         elif self.active():
@@ -1459,6 +1554,8 @@ class AdaptiveInvestigation:
             names.add("review_bound_sources")
         if "append_event_finding" in names:
             names.add("append_undated_finding")
+        if self.reader and batch_can_read(self.active()):
+            names.add("read_evidence_batch")
         return [t for t in tools if t.name in names]
 
     def link_citations(self, text):
@@ -1466,10 +1563,25 @@ class AdaptiveInvestigation:
         return re.sub(r"(?<![\w\[])(p-[a-f0-9]{16})(?![\w\]])", r"[\1]", text)
 
     def prompt(self):
+        if self.editions and self.editions.parts():
+            return self.editions.prompt()
         if self.current_check:
             return self.current_check.prompt()
         active = self.active()
-        if active and not self.write_recovery.waiting():
+        if active and active.get("batch_targets") and not self.write_recovery.waiting():
+            self.refresh()
+            if all(
+                self.data["gaps"][t["gap_id"]]["status"] == "resolved"
+                for t in active["batch_targets"]
+            ):
+                self.close_round("All batch targets have original-backed results")
+            elif not active["search_result"].get("candidate_ids"):
+                self.close_round(
+                    "The batch found no usable candidates; revise the remaining routes"
+                )
+            elif len(active.get("monthly_rejected_turns", [])) >= 2:
+                self.close_round("Use a different route for the remaining unbound monthly targets")
+        elif active and not self.write_recovery.waiting():
             part_id = active.get("question_part_id")
             after = self.measure(self.data["gaps"][active["gap_id"]], part_id)
             new_findings = set(after["findings"]) - set(active["before"]["findings"])
@@ -1528,6 +1640,54 @@ class AdaptiveInvestigation:
                 correction.update(status="interrupted")
                 self.save()
         info = self.runtime_summary()
+        if latest := self.initial_publication():
+            info["anchor_instruction"] = "Use locate_latest_edition for " + latest[1]["publication"]
+        if self.parallel_search_enabled:
+            info["max_concurrent_retrieval_requests"] = MAX_CONCURRENT_SEARCHES
+        if self.parallel_search_enabled and not self.graph.data["nodes"]:
+            info["scope_planning_contract"] = SCOPE_PLAN
+        if targets := pending_targets(self):
+            info["parallel_search_targets"] = {
+                "concurrency": MAX_CONCURRENT_SEARCHES,
+                "targets": [
+                    {
+                        k: g[k]
+                        for k in (
+                            "gap_id",
+                            "question_part_id",
+                            "reference_month",
+                            "title",
+                            "evidence_needed",
+                        )
+                        if k in g
+                    }
+                    for g in targets
+                ],
+                "instruction": (
+                    "Call search_planned_months for the scheduled releases now."
+                    if all(g.get("publication") and not g["attempts"] for g in targets)
+                    else "Use search_monthly_records. Give the publication title and part IDs "
+                    "sharing it. The scheduler adds each month. Read the release, extract distinct "
+                    "metrics and units, then analyze their trend."
+                    if any(g.get("reference_month") for g in targets)
+                    else "Use search_evidence_batch with one scoped query per target. "
+                    "Read and bind jointly after retrieval."
+                ),
+            }
+        if self.parallel_search_enabled and not self.active():
+            outcomes = batch_outcomes(self)
+            remaining = [
+                target_receipt(t)
+                | {"previous_query": t["query"], "source_domains": t["include_domains"]}
+                for gap in targets or info["queue"]
+                if (t := outcomes.get(gap["gap_id"])) and not t["covered"]
+            ]
+            if remaining:
+                info["previous_batch_outcomes"] = remaining
+                info["batch_replan_instruction"] = (
+                    "Change the evidence route for each unresolved line based on its outcome. "
+                    "For example, use a different publisher, a historical table, or an archive."
+                )
         if target := self.pending_series():
             info["monthly_history_target"] = target[1]
             info["monthly_history_instruction"] = (
@@ -1550,7 +1710,11 @@ class AdaptiveInvestigation:
                     "the evidence route, or set it aside to investigate other gaps."
                 )
             }
-        if any(g.get("reference_month") for g in info["queue"]):
+        if (
+            not self.active()
+            and not targets
+            and any(g.get("reference_month") for g in info["queue"])
+        ):
             info["month_search_instruction"] = (
                 "Choose an untried month gap and search that reference month only. "
                 "The harness sets its window. A verified table may supply other months too."
@@ -1566,7 +1730,14 @@ class AdaptiveInvestigation:
                         "For a month, target its own observation period and a different source."
                     ),
                 }
-        if series := self.monthly_round():
+        if info["active_round"] and info["active_round"].get("batch_targets"):
+            info["active_batch_instruction"] = (
+                "Select originals for each line with read_evidence_batch. A shared document "
+                "can be listed for several gap IDs. Bind each answer to its part and, for "
+                "series, exact observation month. Save supported findings even when some "
+                "lines remain open. Close the batch with the actual remaining limitations."
+            )
+        elif series := self.monthly_round():
             active = self.active()
             info["monthly_series_instruction"] = (
                 "Bind the newest observed reference month in the latest-release part first, "
@@ -1576,6 +1747,17 @@ class AdaptiveInvestigation:
                 "do not take a previous-month comparison, trailing average, forecast or release "
                 "date as a point. Do not wait for all the months before writing the first."
             )
+            if (
+                series["monthly_series"].get("publication")
+                and active["question_part_id"] == series["monthly_series"]["anchor_part_id"]
+            ):
+                info["monthly_series_instruction"] = (
+                    "Bind the latest reported observation month with a source passage naming that "
+                    "edition. Compare returned official releases for a later observation month. "
+                    "Do not substitute a release date or forecast. The anchor only needs the "
+                    "edition's observation month, not the values. Write one short assertion, "
+                    "set answers_question_part=true and use month precision."
+                )
             if self.monthly_handoff():
                 info["monthly_binding_handoff"] = {
                     "target": active["question_part_id"],
@@ -1749,6 +1931,7 @@ class AdaptiveInvestigation:
             inspect_investigation,
             replan_gap,
             search_gap,
+            *(batch_tool(self) if self.parallel_search_enabled else []),
             close_gap_round,
             review_node_sources,
             *([review_bound_sources] if self.budget.config.max_tokens is None else []),

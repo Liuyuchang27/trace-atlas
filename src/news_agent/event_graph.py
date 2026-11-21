@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import re
+from collections import Counter
 from datetime import date
 from itertools import combinations
 from typing import Literal
@@ -16,7 +17,7 @@ from pydantic import Field, model_validator
 
 from .answer_contract import dates
 from .historical_series import calculated_value_in_original
-from .monthly_series import month_coverage, monthly_value_in_original
+from .monthly_series import explicit_search_months, month_coverage, monthly_value_in_original
 from .schemas import StrictModel
 from .selections import excerpts
 from .storage import read_json
@@ -146,13 +147,17 @@ class Finding(StrictModel):
     answers_node_question: bool = False
     answers_question_part: bool = False
     question_part_id: str | None = Field(default=None, max_length=32)
-    monthly_value: int | None = Field(
+    monthly_value: int | float | None = Field(
         default=None,
         ge=-(10**15),
         le=10**15,
         exclude_if=lambda v: v is None,
         description="Numeric value for a single observed month of a declared monthly series.",
     )
+    missing_explanation: str | None = Field(
+        default=None, max_length=240, exclude_if=lambda v: v is None
+    )
+    monthly_unavailable: bool = Field(default=False, exclude_if=lambda v: not v)
     monthly_calculation: Literal["adjacent_levels"] | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
@@ -174,10 +179,45 @@ class Scope(StrictModel):
     objective: str = Field(min_length=1, max_length=700)
     window: TimeSpan = Field(default_factory=TimeSpan)
     premise: Literal["untested", "source_supported", "disputed", "not_established"] = "untested"
+    synthesis_tasks: list[str] = Field(default_factory=list, exclude_if=lambda tasks: not tasks)
     minimum_event_anchors: Literal[0, 1, 2] = 2
 
 
+class MonthlyMeasure(StrictModel):
+    adjacent_level_changes: bool = Field(
+        default=False,
+        description="Use historical levels only when computing an absolute change between levels.",
+    )
+    periods: int = Field(
+        ge=2,
+        le=12,
+        description="Number of output periods the user wants. Do not add an input base month to this count.",
+    )
+    access_route: str = Field(
+        min_length=1,
+        max_length=200,
+        description="Where to find editions and an alternative route.",
+    )
+    question: str = Field(
+        min_length=1,
+        max_length=180,
+        description="One requested measurement, with its comparison basis.",
+    )
+    unit: str = Field(min_length=1, max_length=32)
+    publication: str = Field(
+        min_length=1,
+        max_length=160,
+        description="Undated original title in the source language.",
+    )
+    domain: str | None = Field(
+        default=None, max_length=160, description="Publisher hostname only, without URL path."
+    )
+
+
 class MonthlySeries(StrictModel):
+    adjacent_level_changes: bool = Field(default=False, exclude_if=lambda value: not value)
+    publication: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    domain: str | None = Field(default=None, exclude_if=lambda v: v is None)
     periods: int = Field(ge=2, le=12, description="Consecutive months inclusive of latest.")
     anchor_part_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
     unit: str = Field(min_length=1, max_length=32, description="Comparable source unit.")
@@ -188,11 +228,24 @@ class QuestionPart(StrictModel):
     question: str = Field(min_length=1, max_length=180)
     required_occurrence: Literal["observed", "planned", "statement", "any"] = "any"
     requires_date: bool = False
+    evidence_needed: str | None = Field(
+        default=None, min_length=1, max_length=240, exclude_if=lambda v: v is None
+    )
+    depends_on: list[str] = Field(default_factory=list, max_length=5, exclude_if=lambda v: not v)
     monthly_series: MonthlySeries | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
         description="Use for a monthly trend. Anchor to the separate latest-release question part.",
     )
+
+
+def validate_part_dependencies(parts):
+    earlier = set()
+    for part in parts:
+        dependencies = part.get("depends_on", [])
+        if len(set(dependencies)) != len(dependencies) or set(dependencies) - earlier:
+            raise ValueError("Each depends_on ID must name a distinct preceding question part")
+        earlier.add(part["part_id"])
 
 
 class ExcerptRef(StrictModel):
@@ -296,6 +349,16 @@ class EventGraph:
         self.data["history"].append(row)
         self._save()  # the committed event is replayable after checkpoint/journal interruption
         self.store.event("event_graph_changed", **row)
+
+    def record_measure_definition(self, part, label, unit, decision):
+        part["question"] = label
+        part["monthly_series"]["unit"] = unit
+        self._commit(
+            "measure_definition_checked",
+            node_id="investigation",
+            question_part_id=part["part_id"],
+            decision=decision,
+        )
 
     def _references(self, refs):
         rows = []
@@ -417,6 +480,7 @@ class EventGraph:
                 raise ValueError("define 1-6 parts on a question/premise node")
             if len({p["part_id"] for p in proposed}) != len(proposed):
                 raise ValueError("question part IDs must be unique")
+            validate_part_dependencies(proposed)
             if old and parts != proposed:
                 raise ValueError(
                     "question parts are immutable; use a new question for changed scope"
@@ -799,7 +863,13 @@ class EventGraph:
         if not versions and status != "later_context":
             gaps.append("missing_original")
         part_status = []
-        for part in node.get("question_parts", []):
+        question_parts = node.get("question_parts", [])
+        series_anchors = Counter(
+            spec["anchor_part_id"]
+            for part in question_parts
+            if (spec := part.get("monthly_series"))
+        )
+        for part in question_parts:
             bound = [
                 f
                 for f in selected
@@ -822,7 +892,11 @@ class EventGraph:
             covered = any(
                 f["finding"]["stance"] in {"supports", "contradicts"} for f in coverage_rows
             )
-            series = month_coverage(part, selected) if part.get("monthly_series") else None
+            series = None
+            if spec := part.get("monthly_series"):
+                series = month_coverage(
+                    part, selected, allow_anchor_value=series_anchors[spec["anchor_part_id"]] == 1
+                )
             if series:
                 covered = bool(series["anchor"] and not series["missing"])
             disputed = {"supports", "contradicts"} <= stances
@@ -1117,7 +1191,8 @@ def graph_tools(graph):
     ) -> str:
         """Set scope and create the initial unanswered question in ONE action.
 
-        Use the user's requested period. Decompose into 1-6 concise material questions;
+        Use the user's requested period. Decompose into 1-6 independently answerable parts
+        and identify the evidence needed for each. List prerequisites before their dependents;
         optional background must not displace the requested endpoints. No evidence or
         occurrence dates belong on this initial question. Dates in scope are search intent.
         """
@@ -1129,6 +1204,10 @@ def graph_tools(graph):
                 raise ValueError("use a title <=300 characters and at most 6 question parts")
             if len({p.part_id for p in parts}) != len(parts):
                 raise ValueError("question part IDs must be unique")
+            validate_part_dependencies(p.model_dump() for p in parts)
+            if getattr(getattr(graph.evidence, "adaptive", None), "parallel_search_enabled", False):
+                if not parts or any(not (p.evidence_needed or "").strip() for p in parts):
+                    raise ValueError("Define each requested deliverable with its evidence_needed")
             anchors = {p.part_id for p in parts if p.monthly_series is None}
             if any(
                 p.monthly_series and p.monthly_series.anchor_part_id not in anchors for p in parts
@@ -1355,16 +1434,98 @@ def graph_tools(graph):
         except (ValueError, KeyError) as exc:
             return json.dumps({"error": str(exc), "current": graph.summary()}, ensure_ascii=False)
 
-    return [
-        set_investigation_scope,
-        record_event_finding,
-        append_event_finding,
-        create_event_node,
-        record_event_relation,
-        record_source_relation,
-        inspect_event_graph,
-    ] + (
-        [append_undated_finding, begin_investigation] if hasattr(graph.evidence, "adaptive") else []
+    @tool
+    async def begin_research_plan(
+        title: str,
+        scope: Scope,
+        records: list[QuestionPart],
+        monthly_measures: list[MonthlyMeasure],
+    ) -> str:
+        """Plan publicly attainable original records and the analysis to perform on them.
+        For individually retrievable facts, use records. For repeated monthly observations,
+        use monthly_measures. Put comparisons, calculations and interpretation in
+        scope.synthesis_tasks. Use the same publication name for measures from one release.
+        """
+        measures = monthly_measures
+        parts = []
+        if not scope.synthesis_tasks or not (records or measures):
+            return json.dumps({"error": "Specify evidence inputs and what to synthesize from them"})
+        anchor = "latest-release"
+        if measures:
+            parts.append(
+                QuestionPart(
+                    part_id=anchor,
+                    question="最新已发布原文对应哪个观察月？",
+                    evidence_needed="原始发布机构的最新一期材料，注明数据所属年月",
+                    requires_date=True,
+                )
+            )
+        if len(measures) + len(records) + len(parts) > 6:
+            return json.dumps(
+                {"error": "Prioritize the requested outputs within six parts including the anchor"}
+            )
+        if measures and any(
+            re.search(r"latest|最新", r.question, re.I)
+            and re.search(r"release|publish|发布|观察月", r.question, re.I)
+            and r.requires_date
+            for r in records
+        ):
+            return json.dumps(
+                {
+                    "error": "The runtime supplies the latest-edition question. Remove duplicate date-only records; retain genuinely separate user requests."
+                }
+            )
+        for i, m in enumerate(measures, 1):
+            if explicit_search_months(m.publication):
+                return json.dumps({"error": "Supply an undated publication title."})
+            if m.domain and not re.fullmatch(r"[a-zA-Z0-9.-]+", m.domain):
+                return json.dumps({"error": "Use a bare publisher hostname"})
+            parts.append(
+                QuestionPart(
+                    part_id=f"metric-{i}",
+                    question=m.question,
+                    evidence_needed=m.access_route,
+                    depends_on=[anchor],
+                    monthly_series=MonthlySeries(
+                        periods=m.periods,
+                        adjacent_level_changes=m.adjacent_level_changes,
+                        anchor_part_id=anchor,
+                        unit=m.unit,
+                        publication=m.publication,
+                        domain=m.domain,
+                    ),
+                )
+            )
+        parts.extend(records)
+        return await begin_investigation.ainvoke(
+            dict(
+                scope=scope.model_dump(),
+                node_id="investigation",
+                title=title,
+                question_parts=[p.model_dump() for p in parts],
+            )
+        )
+
+    return (
+        [
+            set_investigation_scope,
+            record_event_finding,
+            append_event_finding,
+            create_event_node,
+            record_event_relation,
+            record_source_relation,
+            inspect_event_graph,
+        ]
+        + (
+            [append_undated_finding, begin_investigation]
+            if hasattr(graph.evidence, "adaptive")
+            else []
+        )
+        + (
+            [begin_research_plan]
+            if getattr(getattr(graph.evidence, "adaptive", None), "parallel_search_enabled", False)
+            else []
+        )
     )
 
 

@@ -191,6 +191,9 @@ main { width: 100%; max-width: 1390px; justify-self: center; min-width: 0; paddi
 .inspector p { margin: 6px 0; color: var(--muted); font-size: 12px; line-height: 1.72; overflow-wrap: anywhere; }
 .inspector h4 { margin: 15px 0 6px; font-size: 12px; font-weight: 660; }
 .inspector pre { max-height: 208px; overflow: auto; padding: 9px; margin: 0; border-radius: 9px; background: #edeae1; color: #384439; font: 10px/1.62 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.node-technical { margin-top: 18px; border-top: 1px solid #ded8ca; padding-top: 10px; }
+.node-technical summary { color: var(--muted); cursor: pointer; font-size: 12px; }
+.node-technical[open] summary { margin-bottom: 8px; }
 .inspector blockquote { margin: 8px 0; padding: 10px; border-radius: 10px; background: var(--paper); font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .citation { display: inline-flex; align-items: center; gap: 4px; min-height: 25px; border: 0; border-radius: var(--radius-pill); padding: 2px 9px; background: var(--green-light); color: var(--green); font-size: 11px; }
 .citation:hover { background: #dfeadd; }
@@ -263,6 +266,7 @@ main { width: 100%; max-width: 1390px; justify-self: center; min-width: 0; paddi
 .question-parts { display: flex; flex-wrap: wrap; gap: 6px; margin: 11px 0 10px 43px; }
 .part { max-width: 100%; border-radius: 10px; padding: 5px 8px; background: #f7f0e3; color: #755b42; font-size: 11px; }
 .part.covered { color: var(--green); background: var(--green-light); }
+.part-evidence { display: block; margin-top: 3px; color: var(--muted); line-height: 1.45; }
 .event-spine { margin-inline-start: 17px; padding: 1px 0 1px 25px; border-inline-start: 1px solid #dfc9a9; }
 .event-card { position: relative; width: 100%; margin: 9px 0; padding: 14px; text-align: left; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--soft); transition: border-color .18s, background-color .18s; }
 .event-card:hover, .event-card.selected { border-color: #cda478; background: #fdf2e2; }
@@ -383,3 +387,11 @@ dialog textarea { min-height: 105px; padding: 12px; resize: vertical; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   #graph-fuse { display: none; }
 }
+
+.edge.parallel-flow { stroke: #ca7932; stroke-width: 2.3; stroke-dasharray: 6 5; }
+@media (prefers-reduced-motion: no-preference) {
+  .edge.parallel-flow { animation: branch-transit .64s linear infinite; }
+  .runtime_batch_target.running { animation: branch-glow 1.3s ease-in-out infinite alternate; }
+}
+@keyframes branch-transit { to { stroke-dashoffset: -22; } }
+@keyframes branch-glow { to { box-shadow: 0 0 0 3px #eaaf6155; } }

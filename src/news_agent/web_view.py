@@ -51,17 +51,30 @@ def run_key(root, run_dir):
 
 
 KINDS = {
+    "search_publications": "search",
+    "read_publication": "read",
+    "review_publication_metrics": "verify",
+    "confirm_edition": "temporal",
+    "save_observations": "claim",
+    "finish_publication": "synthesis",
     "begin_temporal_context": "read",
     "propose_temporal_resolution": "verify",
     "retain_temporal_unknown": "gap",
     "request_temporal_reaudit": "verify",
+    "begin_research_plan": "plan",
+    "locate_latest_edition": "search",
+    "search_planned_months": "search",
     "begin_investigation": "plan",
     "replan_gap": "plan",
     "search_gap": "search",
+    "search_monthly_records": "search",
+    "search_evidence_batch": "search",
+    "read_evidence_batch": "read",
     "collect_monthly_history": "search",
     "select_monthly_series": "read",
     "search_current_sources": "search",
     "read_current_sources": "read",
+    "recover_official_sources": "search",
     "refresh_current_status": "search",
     "search_previous_sales": "search",
     "record_current_result": "verify",
@@ -95,17 +108,30 @@ KINDS = {
     "list_evidence": "claim",
 }
 LABELS = {
+    "search_publications": "分路查找发布记录",
+    "read_publication": "定位原表与日期依据",
+    "review_publication_metrics": "对照原文核查规划中的指标口径",
+    "confirm_edition": "核对最新一期和下次发布日期",
+    "save_observations": "将原表数据写入对应月份",
+    "finish_publication": "汇总各期调查结果",
     "begin_temporal_context": "回读时间依据上下文",
     "propose_temporal_resolution": "关联时间补证与旧缺口",
     "retain_temporal_unknown": "补证后保留时间未知",
     "request_temporal_reaudit": "提交独立时间复审",
+    "begin_research_plan": "规划原始资料与分析任务",
+    "locate_latest_edition": "查找发布机构最新原文",
+    "search_planned_months": "按观察月检索原始发布",
     "begin_investigation": "确定范围与核心问题",
     "replan_gap": "根据反馈调整方案",
     "search_gap": "按缺口补搜",
+    "search_monthly_records": "逐月查找原始发布",
+    "search_evidence_batch": "并行取证",
+    "read_evidence_batch": "并行读取原文",
     "collect_monthly_history": "查找完整月度原表",
     "select_monthly_series": "选定并读取月度序列",
     "search_current_sources": "查最新一手消息和目标数据",
     "read_current_sources": "核对一手原文",
+    "recover_official_sources": "切换检索语言，分查发布机构和披露原文",
     "refresh_current_status": "发现预载旧记录，直查官方公告",
     "search_previous_sales": "回查上一披露时段",
     "record_current_result": "给出截至核查日的结论",
@@ -173,6 +199,9 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
     temporal_audit = None
     retry_nodes = {}
     repair_parents = {}
+    batch_queries, batch_nodes = {}, {}
+    batch_evidence = {}
+    batch_reads = {}
     for event in events:
         kind, seq = event["kind"], event["sequence"]
         if kind == "public_plan_updated":
@@ -207,7 +236,7 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
                 pass
             if not isinstance(payload, dict):
                 payload = {"value": payload}
-            title = args.get("query") or args.get("text") or args.get("url")
+            title = args.get("purpose") or args.get("query") or args.get("text") or args.get("url")
             doc = docs.get(args.get("version_id"), candidates.get(args.get("version_id"), {}))
             title = title or doc.get("title") or LABELS.get(name, name)
             nodes[identifier] = {
@@ -265,7 +294,117 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
                     node["title"] = f"{month} · {node['title']}"
                 else:
                     node["label"] = "按分项补查"
-        elif kind == "search_intent" and current_action:
+        elif kind == "adaptive_batch_started" and event.get("action_id") in action_nodes:
+            parent = action_nodes[event["action_id"]]
+            targets = event["targets"]
+            nodes[parent]["title"] = (
+                f"并行检索 {len({t.get('search_group', t['gap_id']) for t in targets})} 组资料"
+            )
+            nodes[parent]["details"]["batch"] = {
+                "targets": len(targets),
+                "concurrency": event["concurrency"],
+            }
+            for target in targets:
+                nid = f"batch:{event['round_id']}:{target.get('search_group', target['gap_id'])}"
+                batch_nodes[(event["round_id"], target["gap_id"])] = nid
+                if nid in nodes:
+                    nodes[nid]["details"]["parts"].append(target["question_part_id"])
+                    continue
+                batch_queries[
+                    (parent, target["query"], tuple(target.get("include_domains", [])))
+                ] = nid
+                nodes[nid] = {
+                    "id": nid,
+                    "kind": "search",
+                    "label": "按月并行检索" if target.get("reference_month") else "子问题并行检索",
+                    "title": target.get("reference_month", "")
+                    + " · "
+                    + target.get("record_name", event["reason"])
+                    if event.get("reason")
+                    and nodes[parent].get("tool")
+                    in {"search_monthly_records", "search_planned_months"}
+                    else target["question"],
+                    "status": "planned",
+                    "sequence": seq,
+                    "time": event["time"],
+                    "details": {"arguments": target, "parts": [target["question_part_id"]]},
+                    "provenance": "runtime_batch_target",
+                }
+                edges.append({"from": parent, "to": nid, "kind": "explicit", "sequence": seq})
+        elif kind == "adaptive_batch_target_result" and (
+            child := batch_nodes.get((event["round_id"], event["gap_id"]))
+        ):
+            node = nodes[child]
+            node.update(
+                end_sequence=seq, final_status="blocked" if event.get("error") else "completed"
+            )
+            node["details"]["result"] = {k: event[k] for k in ("candidate_ids", "error", "status")}
+        elif kind == "adaptive_batch_read_started" and event.get("action_id") in action_nodes:
+            parent = action_nodes[event["action_id"]]
+            nodes[parent]["title"] = f"并行读取 {len(event['targets'])} 个来源"
+            for target in event["targets"]:
+                vid = target["version_id"]
+                nid = f"batch-read:{seq}:{vid}"
+                batch_reads[(event["action_id"], vid)] = nid
+                if target.get("url"):
+                    batch_queries[(parent, target["url"])] = nid
+                nodes[nid] = {
+                    "id": nid,
+                    "kind": "read",
+                    "label": "子线原文",
+                    "status": "planned",
+                    "title": target.get("title") or vid,
+                    "sequence": seq,
+                    "time": event["time"],
+                    "provenance": "runtime_batch_target",
+                    "details": {"arguments": target},
+                    "url": safe_url(target.get("url")),
+                }
+                edges.append({"from": parent, "to": nid, "kind": "explicit", "sequence": seq})
+                for gap_id in target["gap_ids"]:
+                    target_key = (event["round_id"], gap_id)
+                    batch_evidence.setdefault(target_key, []).append(nid)
+                    if source := batch_nodes.get(target_key):
+                        edges.append(
+                            {"from": source, "to": nid, "kind": "explicit", "sequence": seq}
+                        )
+        elif kind == "adaptive_batch_read_result" and (
+            child := batch_reads.get((event.get("action_id"), event["version_id"]))
+        ):
+            node = nodes[child]
+            node.update(
+                end_sequence=seq,
+                final_status="blocked" if event.get("error") else "completed",
+                passage_ids=event["passage_ids"],
+            )
+            node["details"]["result"] = {k: event[k] for k in ("passage_ids", "error", "status")}
+        elif kind == "adaptive_batch_closed":
+            nid = f"event:{seq}"
+            covered = sum(target["covered"] for target in event["targets"])
+            nodes[nid] = {
+                "id": nid,
+                "kind": "synthesis",
+                "status": "completed",
+                "sequence": seq,
+                "title": f"汇总子线结果 · {covered}/{len(event['targets'])} 项有原文覆盖",
+                "details": event,
+                "provenance": "runtime_event",
+                "time": event["time"],
+            }
+            edges.append({"from": previous, "to": nid, "kind": "sequence", "sequence": seq})
+            joined = set()
+            for target in event["targets"]:
+                target_key = (event["round_id"], target["gap_id"])
+                joined.update(batch_evidence.get(target_key) or [batch_nodes.get(target_key)])
+            for source in sorted(joined - {None}):
+                edges.append({"from": source, "to": nid, "kind": "explicit", "sequence": seq})
+            previous = nid
+        elif (
+            kind == "search_intent"
+            and current_action
+            and nodes[current_action].get("tool")
+            not in {"search_evidence_batch", "search_monthly_records", "search_planned_months"}
+        ):
             node = nodes[current_action]
             node["public_reason"] = event["purpose"]
             node["details"]["public_intent"] = event
@@ -399,17 +538,121 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
                 )
             edges.append({"from": previous, "to": identifier, "kind": "sequence", "sequence": seq})
             previous = identifier
+        elif kind in {
+            "publication_period_verified",
+            "publication_source_inspected",
+            "publication_definition_checked",
+            "publication_rows_checked",
+        }:
+            title = {
+                "publication_definition_checked": (
+                    "依据原表修正规划"
+                    if event.get("fit") in {"revise_assumption", "added_from_original"}
+                    else "核实原表口径"
+                )
+                + " · "
+                + str(event.get("label", "")),
+                "publication_period_verified": f"核实所属期 {event.get('month', '')} · 下期计划 {event.get('next_release_date', '')}",
+                "publication_source_inspected": str(event.get("purpose") or "读取发布原文"),
+                "publication_rows_checked": f"原表核对完成 · 写入 {len(event.get('accepted', []))} 项，退回 {len(event.get('rejected', []))} 项",
+            }[kind]
+            identifier = "publication:" + str(seq)
+            nodes[identifier] = {
+                "id": identifier,
+                "kind": "read" if kind == "publication_source_inspected" else "verify",
+                "title": title,
+                "status": "completed",
+                "sequence": seq,
+                "time": event["time"],
+                "details": event,
+                "url": safe_url(event.get("url")),
+                "provenance": "runtime_event",
+            }
+            edges.append(
+                {
+                    "from": current_action or previous,
+                    "to": identifier,
+                    "kind": "explicit",
+                    "sequence": seq,
+                }
+            )
+        elif kind in {"official_coverage_replanned", "official_route_checked"}:
+            identifier = "official:" + str(seq)
+            title = (
+                "改查发布机构原文和披露档案"
+                if kind == "official_coverage_replanned"
+                else f"{event['domain']} · 读到 {len(event['originals'])} 份候选原文"
+            )
+            nodes[identifier] = {
+                "id": identifier,
+                "kind": "source_check",
+                "title": title,
+                "status": "completed",
+                "sequence": seq,
+                "time": event["time"],
+                "details": event,
+                "provenance": "runtime_event",
+            }
+            edges.append(
+                {
+                    "from": current_action or previous,
+                    "to": identifier,
+                    "kind": "explicit",
+                    "sequence": seq,
+                }
+            )
         elif kind == "retrieval_dispatch":
-            # The tool boundary serializes calls, including nested gap searches.
-            row = {**event, "node_id": current_action}
+            # One outer batch owns its parallel subrequests; match the exact executed query.
+            args = event.get("arguments", {})
+            key = args.get("query") or next(iter(args.get("urls") or []), None)
+            child = batch_queries.get(
+                (current_action, key, tuple(args.get("include_domains") or []))
+            ) or batch_queries.get((current_action, key))
+            if (
+                event.get("operation") == "search"
+                and current_action
+                and nodes[current_action].get("tool") == "search_publications"
+            ):
+                lookup = next(
+                    (
+                        r
+                        for r in nodes[current_action]["details"]["arguments"].get("lookups", [])
+                        if r.get("query") == key
+                    ),
+                    {},
+                )
+                child = "publication-search:" + event["request_id"]
+                nodes[child] = {
+                    "id": child,
+                    "kind": "search",
+                    "label": "检索分支",
+                    "title": lookup.get("purpose") or key,
+                    "status": "planned",
+                    "sequence": seq,
+                    "time": event["time"],
+                    "provenance": "runtime_batch_target",
+                    "details": {"arguments": args},
+                }
+                edges.append(
+                    {"from": current_action, "to": child, "kind": "explicit", "sequence": seq}
+                )
+            node_id = child or current_action
+            row = {**event, "node_id": node_id}
             network_requests.append(row)
             request_nodes[event["request_id"]] = row
-            if current_action:
-                nodes[current_action].setdefault("requests", []).append(row)
+            if node_id:
+                nodes[node_id].setdefault("requests", []).append(row)
+            if child:
+                nodes[child].setdefault("started_sequence", seq)
         elif kind == "retrieval_result":
             row = request_nodes.get(event["request_id"])
             if row is not None:
                 row["result"] = event
+                if (row.get("node_id") or "").startswith("publication-search:"):
+                    nodes[row["node_id"]].update(
+                        end_sequence=seq,
+                        final_status="blocked" if event.get("error") else "completed",
+                    )
         elif kind in {"gap_repair_step_requested", "gap_repair_not_admitted", "gap_repair_stopped"}:
             identifier = "repair-step:" + str(seq)
             repair_step = identifier
@@ -476,10 +719,18 @@ def build_snapshot(run_dir: Path, *, active=False, worker_status=None):
             previous = identifier
     # Missing results after a finished worker are interrupted, not forever running.
     for node in nodes.values():
-        if node.get("status") == "running" and not active and node.get("tool"):
-            if "end_sequence" not in node:
-                node["final_status"] = "interrupted"
-                node["end_sequence"] = events[-1]["sequence"] if events else node["sequence"]
+        if (
+            not active
+            and "end_sequence" not in node
+            and (
+                (node.get("status") == "running" and node.get("tool"))
+                or node.get("provenance") == "runtime_batch_target"
+            )
+        ):
+            node["final_status"] = (
+                "interrupted" if node.get("requests") or node.get("tool") else "blocked"
+            )
+            node["end_sequence"] = events[-1]["sequence"] if events else node["sequence"]
     report_path = run_dir / "report.md"
     report = report_path.read_text() if report_path.exists() else ""
     claims = maybe_json(run_dir / "claims.json", [])

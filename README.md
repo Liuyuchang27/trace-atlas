@@ -31,6 +31,12 @@ The workbench exposes the **调查过程** view for observing and replaying acti
 
 The staged profile uses DeepSeek Flash and DeepSeek V4 Pro and enables high reasoning for the isolated date and report reviews. Transient DeepSeek request failures can retry up to three times, with delays of 12, 16, and 20 seconds. Request counts and token limits apply to the shared run budget. You can inspect the retry in the workbench.
 
+## November 21 trial
+
+The planner can dispatch independent evidence searches in parallel (up to 42). For a series, the agent can read several periods from the same original table and compare the planned measure with its headings. The current-fact report writer receives the original question and cited passages and distinguishes official disclosures from third-party estimates.
+
+For questions such as “How many copies did the newest release sell?”, check that the selected product really is the latest release and that the figure covers the requested edition, region and period. The agent can select an older product with a newer sales announcement. This is a known limitation of this trial.
+
 ## Recent improvements
 
 - For recent-fact questions, the agent checks the publisher and its disclosures. For sales questions it can look back to the previous reporting period and read the new candidates. The report leads with the available data, labels third-party preorder estimates, and states the investigation cutoff and unresolved questions.

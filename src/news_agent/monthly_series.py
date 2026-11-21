@@ -13,6 +13,7 @@ def shift_month(month, offset):
 
 
 def reported_number(value, originals):
+    value = Decimal(str(value))
     for quote in originals:
         for literal, scale in re.findall(
             r"(?<![\w.,])([+\-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?!\d|[.,]\d)"
@@ -32,6 +33,7 @@ def monthly_value_in_original(value, month, originals):
 
     if reported_number(value, originals):
         return True
+    value = Decimal(str(value))
     for quote in originals:
         for is_table, block in groupby(
             quote.splitlines(), key=lambda line: line.lstrip().startswith("|")
@@ -62,6 +64,10 @@ def monthly_value_in_original(value, month, originals):
 
 def explicit_search_months(query):
     months = set(re.findall(r"(?<!\d)\d{4}-(?:0[1-9]|1[0-2])(?!\d)", query))
+    months.update(
+        f"{year}-{int(month):02d}"
+        for year, month in re.findall(r"(?<!\d)(\d{4})\s*年\s*(1[0-2]|0?[1-9])\s*月", query)
+    )
     names = {
         name.lower(): number
         for number in range(1, 13)
@@ -80,12 +86,12 @@ def explicit_search_months(query):
     return months
 
 
-def month_coverage(part, findings):
+def month_coverage(part, findings, *, allow_anchor_value=True):
     spec = part["monthly_series"]
     dated = [
         (row, f["event_time"]["start"], f)
         for row in findings
-        if (f := row["finding"])["occurrence"] == "observed"
+        if (f := row["finding"])["occurrence"] in {"observed", "statement"}
         and f["stance"] == "supports"
         and f["event_time"]["precision"] == "month"
         and row["references"]
@@ -105,18 +111,27 @@ def month_coverage(part, findings):
     points = {}
     for m in months:
         candidates = [
-            (row["finding_id"], f["monthly_value"])
+            (row["finding_id"], f.get("monthly_value"))
             for row, observed, f in dated
-            if observed == m
-            and f.get("monthly_value") is not None
+            if f["occurrence"] == "observed"
+            and observed == m
+            and (f.get("monthly_value") is not None or f.get("monthly_unavailable"))
             and (
                 f.get("question_part_id") == part["part_id"]
-                or (m == anchor and f.get("question_part_id") == spec["anchor_part_id"])
+                or (
+                    allow_anchor_value
+                    and m == anchor
+                    and f.get("question_part_id") == spec["anchor_part_id"]
+                )
             )
         ]
         if len({value for _, value in candidates}) == 1:
             fid, value = candidates[-1]
-            points[m] = {"finding_id": fid, "value": value}
+            points[m] = {
+                "finding_id": fid,
+                "value": value,
+                **({"unavailable": True} if value is None else {}),
+            }
     return {
         "anchor": anchor,
         "months": months,

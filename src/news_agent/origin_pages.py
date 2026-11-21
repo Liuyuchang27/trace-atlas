@@ -77,6 +77,18 @@ def page_text(html):
         href = link["href"]
         if label and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
             link.replace_with(f"[{label}]({href})")
+    for table in reversed(root.find_all("table")):
+        rows = []
+        caption = table.find("caption")
+        if caption:
+            rows.append(" ".join(caption.stripped_strings))
+        for row in table.find_all("tr"):
+            cells = [
+                " ".join(td.stripped_strings) for td in row.find_all(["th", "td"], recursive=False)
+            ]
+            if cells:
+                rows.append("| " + " | ".join(cells) + " |")
+        table.replace_with("\n" + "\n".join(rows) + "\n")
     for tag in root.find_all(["h1", "h2", "h3", "p", "time", "li"]):
         tag.insert_before("\n")
         tag.insert_after("\n")
