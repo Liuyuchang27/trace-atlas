@@ -1,35 +1,64 @@
-.brief-export { max-width: 1050px; margin: auto; padding: 32px 20px; color: #263e34; font: 15px/1.8 system-ui, sans-serif; }
-.brief-export a, .brief a { color: #365e43; }
-.brief { padding: clamp(18px, 3vw, 34px); color: #263e34; font-size: 14px; line-height: 1.8; }
-.brief section { margin-bottom: 24px; }
-.brief h2 { margin: 0 0 12px; font: 500 21px/1.4 Georgia, "Songti SC", serif; }
-.brief h3 { margin: 0 0 10px; font: 600 15px/1.5 system-ui, sans-serif; }
-.brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
-.brief article, .brief details { border: 1px solid #dce1d3; border-radius: 10px; background: #fcfcf5; padding: 14px 17px; min-width: 0; }
-.brief details { margin-top: 12px; }
-.brief summary, .brief-export summary { cursor: pointer; font-weight: 600; }
-.brief p { margin: 7px 0; overflow-wrap: anywhere; }
-.brief time, .brief-kind { display: inline-block; margin-right: 6px; color: #4e674d; background: #edf1e6; padding: 1px 7px; border-radius: 5px; font-size: 12px; }
-.brief-finding { scroll-margin-top: 18px; }
-.brief-finding + .brief-finding { border-top: 1px solid #e0e4d7; margin-top: 12px; padding-top: 12px; }
-.brief-finding:target { outline: 2px solid #8eab82; outline-offset: 4px; border-radius: 4px; }
-.brief small { color: #5e6f5f; }
-.brief-citation { display: inline-block; border: 1px solid #dce4d8; padding: 0 7px; border-radius: 4px; font-size: 11px; }
-.brief .brief-timeline { display: flex; flex-wrap: wrap; gap: 10px; list-style: none; margin: 0; padding: 12px; background: #f1f3e9; border-radius: 8px; }
-.brief-timeline li { border-left: 3px solid #7c9d72; padding: 3px 11px; }
-.brief-timeline a { display: inline-grid; place-items: center; height: 25px; min-width: 25px; margin: 4px 2px 0 0; border: 1px solid #cbd8c6; border-radius: 50%; font-size: 11px; }
-.brief .brief-note { background: #faf2df; border-left: 3px solid #bc9658; border-radius: 3px; padding: 9px 12px; margin-bottom: 15px; font-size: 13px; }
+/* Also used by the standalone HTML export. */
+.brief-export {
+  max-width: 1020px;
+  margin: 0 auto;
+  padding: 28px clamp(12px, 4vw, 34px);
+  color: #28352e;
+  background: #fffefa;
+  font: 15px/1.72 var(--font-ui, system-ui, sans-serif);
+}
+.brief-export > h1 { margin: 0 0 8px; font-size: clamp(26px, 4vw, 41px); line-height: 1.22; letter-spacing: -.035em; }
+.brief-export a, .brief a { color: #406653; text-underline-offset: 3px; }
+.brief {
+  max-width: 935px;
+  margin: auto;
+  padding: clamp(16px, 3.5vw, 32px);
+  color: #28352e;
+  font: 15px/1.75 var(--font-ui, system-ui, sans-serif);
+}
+.brief-export .brief { padding-inline: 0; }
+.brief > section { margin-bottom: 22px; }
+.brief > section:last-of-type { margin-bottom: 15px; }
+.brief > section:first-child { padding: clamp(15px, 3vw, 24px); border-radius: 18px; background: #f5f3e9; }
+.brief h2 { margin: 0 0 9px; font-size: clamp(18px, 2.4vw, 23px); font-weight: 680; line-height: 1.4; letter-spacing: -.026em; }
+.brief > section:first-child h2 { font-size: clamp(21px, 3vw, 28px); }
+.brief h3 { margin: 0 0 7px; font-size: 16px; font-weight: 660; line-height: 1.5; }
+.brief p { margin: 6px 0; overflow-wrap: anywhere; }
+.brief small, .brief .muted { color: #626c62; }
+.brief .muted { font-size: 13px; }
+.brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 10px; }
+.brief article, .brief details { min-width: 0; border: 1px solid #e8e2d7; border-radius: 15px; background: #faf8f2; padding: 12px 14px; }
+.brief > section:first-child article { background: #fffdf7; }
+.brief details { margin-top: 8px; }
+.brief summary, .brief-export summary { cursor: pointer; font-weight: 640; }
+.brief ul { padding-inline-start: 1.25em; }
 .brief li { margin-bottom: 6px; overflow-wrap: anywhere; }
-.brief-series { border: 1px solid #dce1d3; background: #fcfcf5; border-radius: 10px; padding: 12px 16px; }
-.series-row { display: grid; grid-template-columns: 85px minmax(52px, 1fr) 94px auto; gap: 10px; align-items: center; padding: 7px 0; }
-.series-row + .series-row { border-top: 1px solid #e4e8dd; }
-.series-row strong { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.series-row .series-missing { font-size: 12px; }
-.series-track { display: block; position: relative; height: 13px; background: #eef0e6; border-radius: 4px; }
-.series-bar { position: absolute; height: 100%; background: #5b8062; border-radius: 3px; }
-.series-bar.down { background: #b87556; }
+.brief time, .brief-kind { display: inline-block; margin-right: 5px; padding: 2px 7px; border-radius: 8px; background: #eaf0e7; color: #4b6451; font-size: 12px; font-variant-numeric: tabular-nums; }
+.brief-finding { scroll-margin-top: 16px; }
+.brief-finding + .brief-finding { margin-top: 10px; padding-top: 9px; border-top: 1px solid #ebe6dc; }
+.brief-finding:target { outline: 2px solid #8ba390; outline-offset: 3px; }
+.brief-citations { margin-top: 4px; }
+.brief .brief-citation { display: inline-block; margin: 2px 0; padding: 1px 8px; border-radius: 999px; background: #e8efe5; color: #406653; font-size: 11px; white-space: nowrap; text-decoration: none; }
+.brief .brief-citation:hover { background: #dce8d9; }
+.brief .brief-timeline { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 11px; border-radius: 14px; background: #f3f1e9; }
+.brief-timeline li { margin: 0; padding: 3px 7px; }
+.brief-timeline a { display: inline-grid; place-items: center; width: 25px; height: 25px; margin: 4px 2px 0 0; border-radius: 50%; background: #e6ece3; font-size: 11px; }
+.brief .brief-note { padding: 8px 11px; margin-bottom: 11px; border-radius: 11px; color: #74562f; background: #faf0de; font-size: 12px; }
+.brief-series { min-width: 0; padding: 10px 13px; border: 1px solid #e3e4d8; border-radius: 15px; background: #fffdf8; }
+.series-row { display: grid; grid-template-columns: 76px minmax(30px, 1fr) minmax(63px, auto) auto; gap: 7px; align-items: center; padding: 6px 0; }
+.series-row + .series-row { border-top: 1px solid #eeeade; }
+.series-row strong { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 14px; }
+.series-row .series-missing { color: #745f3f; font-size: 11px; }
+.series-track { display: block; position: relative; height: 11px; background: #efefe6; border-radius: 999px; }
+.series-bar { position: absolute; height: 100%; border-radius: 999px; background: #658970; }
+.series-bar.down { background: #ad724f; }
 .series-sources { text-align: right; }
-@media (max-width: 580px) { .series-row { grid-template-columns: 68px minmax(28px, 1fr) 76px; gap: 6px; } .series-sources { grid-column: 2 / -1; } }
-.brief-export blockquote { margin: 15px 0; padding: 10px 14px; border-left: 3px solid #8eab82; white-space: pre-wrap; overflow-wrap: anywhere; }
-.brief-export blockquote:target { background: #fff4d8; }
+.brief-export blockquote { margin: 9px 0; padding: 11px 14px; border-radius: 13px; background: #f6f3eb; white-space: pre-wrap; overflow-wrap: anywhere; }
+.brief-export blockquote:target { background: #fff0d7; }
+@media (max-width: 620px) {
+  .series-row { grid-template-columns: 61px minmax(24px, 1fr) minmax(60px, auto); }
+  .series-row time { margin-right: 0; font-size: 11px; }
+  .series-sources { grid-column: 2 / -1; }
+  .series-sources:empty { display: none; }
+}
 @media print { .brief article { break-inside: avoid; } }
