@@ -89,7 +89,14 @@ def main():
         result = {case:tls(args.repo.resolve(),case,row["predict-timeline"]) for case,row in rows.items()}
         write(args.out/"scores.json",result)
     elif args.suite=="browsecomp-plus":
-        for case,row in rows.items():
+        for path in files:
+            case = path.parent.name
+            row = rows[case]
+            journal = path.with_name("run.json")
+            if journal.is_file():
+                row["status"] = json.loads(journal.read_text()).get("status", row.get("status", "unknown"))
+            else:
+                row.setdefault("status", "unknown")
             write(args.out/(case+".json"),row)
         if args.qrels:
             judged = defaultdict(set)

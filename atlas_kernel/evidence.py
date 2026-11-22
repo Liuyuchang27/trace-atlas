@@ -5,6 +5,9 @@ from datetime import date, datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
+from .usage import measured
+
+
 def url_key(url):
     parts = urlsplit(url)
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", parts.query, ""))
@@ -110,7 +113,7 @@ async def group_periods(model, rows, language, question=""):
     if not dated:
         return view
     compact = [{"number": i + 1, "date": r["date"], "finding": r["event"], "role": r["role"]} for i, r in enumerate(dated)]
-    result = await model.generate(
+    result = await measured("group_timeline", model.generate,
         'Create a chronological digest of the substantive developments. Identify repeated descriptions of one event. '
         'Within each period, list the representative one-based entry numbers for significant developments, leaving out '
         'tangential details and duplicate claims. Keep genuinely different milestones with their own evidence. '
@@ -152,7 +155,7 @@ async def daily_digest(model, request, rows):
             by_day.setdefault(r["date"], []).append(r["event"])
     if not by_day:
         return []
-    result = await model.generate(
+    result = await measured("write_daily_timeline", model.generate,
         'Prepare a news event timeline answering the question. Use only candidate dates and findings provided. '
         'Focus on developments central to the topic. Deduplicate paraphrases of the same development. For each candidate day '
         'write concise, self-contained news sentences with actor, action and outcome. Shared actors or adjacent dates alone '
