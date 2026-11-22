@@ -1,0 +1,22 @@
+[project]
+name = "trace-atlas-kernel"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "httpx>=0.27,<1", "python-dotenv>=1,<2"]
+
+[project.scripts]
+atlas-serve = "atlas_kernel.server:main"
+atlas-bench = "atlas_kernel.bench:main"
+atlas-score = "atlas_kernel.scoring:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["atlas_kernel"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["atlas_kernel", "pyproject.toml", "uv.lock", "README.md", ".env.example", "web/src",
+                "web/public", "web/index.html", "web/package.json", "web/package-lock.json",
+                "web/tsconfig.json", "web/vite.config.mjs"]
