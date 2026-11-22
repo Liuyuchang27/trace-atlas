@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trace-atlas"
+version = "0.2.0"
+description = "Evidence-grounded research with an evolving cognitive graph"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = [
+  "anthropic", "beautifulsoup4", "duckduckgo-search==5.3.1b1", "fastapi",
+  "janus", "openai", "pydantic>=2.6,<3", "python-dotenv",
+  "requests", "sse-starlette==1.8.2", "uvicorn",
+]
+
+[project.optional-dependencies]
+documents = ["chardet", "openpyxl", "pandas", "pdfplumber", "tabulate"]
+browser = ["playwright"]
+
+[project.scripts]
+trace-atlas = "trace_atlas.terminal:main"
+trace-atlas-server = "trace_atlas.app:main"
+
+[tool.setuptools.packages.find]
+include = ["trace_atlas*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+
+[tool.ruff.format]
+exclude = ["trace_atlas/agent/prompts/*"]
