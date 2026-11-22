@@ -460,6 +460,8 @@ class ResearchBoundary(AgentMiddleware):
                 )
             )
             raw = planned.result[0]
+            if raw.response_metadata.get("finish_reason") in {"length", "max_tokens"}:
+                raise BudgetExceeded("output_limit")
             try:
                 arguments = json.loads(raw.text)
             except (TypeError, ValueError):

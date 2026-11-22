@@ -34,6 +34,18 @@ def can_retry(error):
 
 
 class RetryingDeepSeek(ChatDeepSeek):
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if payload.get("response_format") == {"type": "json_object"}:
+            # JSON mode needs no SDK schema parsing. The parse endpoint raises on
+            # length before callbacks see returned usage or our validators see the
+            # finish reason. Keep the same wire body via the normal create endpoint.
+            payload["extra_body"] = {
+                **(payload.get("extra_body") or {}),
+                "response_format": payload.pop("response_format"),
+            }
+        return payload
+
     async def agenerate(self, messages, stop=None, callbacks=None, *, run_id=None, **kwargs):
         handlers = callbacks if isinstance(callbacks, list) else getattr(callbacks, "handlers", ())
         budget = next((h.budget for h in handlers if isinstance(h, BudgetCallback)), None)
