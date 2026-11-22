@@ -1,56 +1,10 @@
-# Credentials and machine-specific configuration
-.env
-.env.*
+.env*
 !.env.example
-**/benchmark/workers.yaml
-*.key
-*.secret
-
-# Python
+.atlas/
+results/
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.ruff_cache/
-.coverage*
-htmlcov/
-build/
-dist/
-*.egg-info/
 .venv/
-venv/
-
-# Frontend
+*.egg-info/
+dist/
 node_modules/
-.vite-cache/
-app/frontend/tests/artifacts/
-
-# Runtime and evaluation output
-app/database/
-app/eval_data/
-app/benchmark/logs/
-app/benchmark/evidence*/
-app/benchmark/*results*.jsonl
-deep_research_bench/results/
-logs/
-temp/
-*.log
-
-# Editors and operating systems
-.idea/
-.vscode/
 .DS_Store
-Thumbs.db
-
-# Generated project site
-.site/
-.demo-capture/
-
-# Local development and evaluation files
-/tests/
-/app/tests/
-/app/benchmark/
-/app/conftest.py
-/app/pytest.ini
-/app/frontend/React/tests/
-/app/frontend/React/src/pages/
-/app/runs/
