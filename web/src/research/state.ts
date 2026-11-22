@@ -3,6 +3,8 @@ export type ResearchActivity = {stage: string; title?: string; query?: string; s
 export type Source = {url: string; title?: string; snippet?: string; evidence_quote?: string};
 type Sources = Record<string,Source>;
 export type ResearchTask = {id: string; question: string; status: TaskStatus; activity?: ResearchActivity;
+  steps?: Array<({action:'search'; query:string} | {action:'read'; focus:string}) & {reason?:string; count:number}>;
+  handoff?: {kind:'agent'|'loop_guard'; reason:string; gap:string};
   result?: {answer: string; references: Sources; evidence_records?: Source[]; error?: string} | null};
 export type TimelineObservation = {date:string; date_end?:string; role:string; event:string; date_basis?:string;
   evidence:{source_url:string; quote:string; source_date?:string}[]};
