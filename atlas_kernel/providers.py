@@ -77,6 +77,8 @@ class Services:
             if repairs > 1:
                 raise ValueError("Empty or malformed model response")
             chunks.clear()
+            # A full repair starts a new answer and may repeat the old prefix.
+            previous_tail = None
             messages.append({"role":"user","content":"Return the complete requested result. Use a JSON object if requested."})
 
     def can_fallback(self, error):
