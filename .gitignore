@@ -1,32 +1,56 @@
-# Local credentials and overrides
+# Credentials and machine-specific configuration
 .env
 .env.*
 !.env.example
-*.pem
+**/benchmark/workers.yaml
 *.key
+*.secret
 
-# Generated investigation records and exports
-/runs/
-/output/
-/tmp/
-/data/raw/
-/data/agent_corpus/
-/data/evaluation_only/
-*.sqlite*
-
-# Environments and build artifacts
-.venv/
-venv/
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
-*.egg-info/
+.coverage*
+htmlcov/
 build/
 dist/
+*.egg-info/
+.venv/
+venv/
 
-# OS and editor files
-.DS_Store
-.vscode/
+# Frontend
+node_modules/
+.vite-cache/
+app/frontend/tests/artifacts/
+
+# Runtime and evaluation output
+app/database/
+app/eval_data/
+app/benchmark/logs/
+app/benchmark/evidence*/
+app/benchmark/*results*.jsonl
+deep_research_bench/results/
+logs/
+temp/
+*.log
+
+# Editors and operating systems
 .idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated project site
+.site/
+.demo-capture/
+
+# Local development and evaluation files
+/tests/
+/app/tests/
+/app/benchmark/
+/app/conftest.py
+/app/pytest.ini
+/app/frontend/React/tests/
+/app/frontend/React/src/pages/
+/app/runs/
