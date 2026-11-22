@@ -70,9 +70,12 @@ class AdaptiveScenario(FixtureChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.calls += 1
         actions, text = [], ""
-        if messages[0].text.startswith(("REPORT_REVISION:", "TEMPORAL_REVIEW:")):
+        # Revision instructions can follow a shared answer-first preamble.
+        # Route by the dedicated system marker, never by research-turn count.
+        markers = set(messages[0].text.splitlines())
+        if markers & {"REPORT_REVISION:", "TEMPORAL_REVIEW:"}:
             payload = json.loads(messages[-1].text)
-            if messages[0].text.startswith("TEMPORAL_REVIEW:"):
+            if "TEMPORAL_REVIEW:" in markers:
                 from news_agent.temporal_review import fixture_review
 
                 text = json.dumps(fixture_review(payload))
