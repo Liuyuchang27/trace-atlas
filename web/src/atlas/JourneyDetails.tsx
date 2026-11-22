@@ -64,6 +64,19 @@ function BranchDetails({ task }: { task: ResearchTask }) {
     <details className="detail-disclosure" open={!finding || undefined}>
       <summary>{t('查看完整查證問題')}</summary><p>{task.question}</p>
     </details>
+    {!!task.steps?.length && <details className="detail-disclosure">
+      <summary>{t('追查過程 · {n} 步', { n: task.steps.length })}</summary>
+      <ol className="detail-periods">{task.steps.map((step, index) => <li key={index}>
+        <small>{t(step.action === 'search' ? '檢索 · {n} 個結果' : '閱讀 · {n} 份原文', { n: step.count })}</small>
+        <strong>{step.action === 'search' ? step.query : step.focus}</strong>
+        {step.reason && <p>{step.reason}</p>}
+      </li>)}</ol>
+    </details>}
+    {task.handoff && <section className="detail-section">
+      <h4>{t('收束原因')}</h4>
+      <p>{task.handoff.kind === 'loop_guard' ? t('相同操作未取得新線索，已交回現有發現。') : task.handoff.reason}</p>
+      {task.handoff.gap && <><h4>{t('仍待查證')}</h4><p>{task.handoff.gap}</p></>}
+    </section>}
     {task.result?.error && <p className="detail-error">{task.result.error}</p>}
     {task.result?.answer && <details className="detail-disclosure" onToggle={e => setFullRecord(e.currentTarget.open)}>
       <summary>{t('查看完整查證記錄')}</summary>

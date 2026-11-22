@@ -19,6 +19,7 @@ import uvicorn
 from .evidence import group_periods
 from .providers import Services
 from .research import Investigation, LANGUAGES, new_view, new_work
+from .usage import UsageLedger
 from .storage import Archive, public_snapshot, recovery, settle
 
 
@@ -82,11 +83,12 @@ def application(database, frontend=None, service_factory=Services):
             if body.recovery_action == "write_report" and not run["work"]["sources"]:
                 raise HTTPException(409, "No saved evidence")
             run["attempt"] += 1
-            # Interrupted searches may be reattempted; successful evidence remains reusable.
-            run["work"]["queries"] = [q for q in run["work"]["queries"] if any(
-                t["status"] == "completed" and (run["view"]["task_activity"].get(t["id"], {}).get("query") == q or t.get("query_key") == q)
-                for t in run["view"]["tasks"].values())]
-            run["work"]["stagnation"] = 0
+            # Older runs have no individual branch checkpoints.
+            if not run["work"].get("branches"):
+                view = run["view"]
+                done = {t.get("query_key") or view["task_activity"].get(t["id"], {}).get("query", "").casefold()
+                        for t in view["tasks"].values() if t["status"] == "completed"}
+                run["work"]["queries"] = [q for q in run["work"]["queries"] if q in done]
         else:
             request = body.model_dump(include={"inputs", "lang", "timeline"})
             if body.previous_run_id:
@@ -118,7 +120,8 @@ def application(database, frontend=None, service_factory=Services):
                 runner = Investigation(run["request"], run["view"], run["work"], services, services, emit)
                 await runner.run(body.recovery_action == "write_report")
                 run["status"] = "completed"
-                await emit("usage.updated", {"usage": run["view"]["usage"]})
+                await emit("usage.updated", {"usage": run["view"]["usage"],
+                                             "usage_breakdown": run["view"].get("usage_breakdown", {})})
                 await emit("research.recovery", recovery(run))
                 await emit("research.completed", run["view"])
             except (Exception, asyncio.CancelledError) as exc:
@@ -174,9 +177,15 @@ def application(database, frontend=None, service_factory=Services):
         if run["status"] in {"running", "stopping"}:
             raise HTTPException(409, "Investigation is still in progress")
         if refresh or not view.get("timeline_view"):
-            result = await group_periods(service_factory(app.state.client), view.get("timeline", []),
-                                         LANGUAGES.get(run["request"]["lang"].lower(), "English"), run["request"]["inputs"])
-            latest = require_run(identifier)
+            services = service_factory(app.state.client)
+            try:
+                result = await group_periods(services, view.get("timeline", []),
+                                             LANGUAGES.get(run["request"]["lang"].lower(), "English"), run["request"]["inputs"])
+            finally:
+                latest = require_run(identifier)
+                if hasattr(services, "meter") and services.meter.rows:
+                    UsageLedger(latest["view"]).merge(services.meter)
+                    app.state.archive.save(latest)
             if latest["attempt"] != run["attempt"]:
                 raise HTTPException(409, "Investigation resumed")
             latest["view"].update(timeline_view=result, timeline_error=False)

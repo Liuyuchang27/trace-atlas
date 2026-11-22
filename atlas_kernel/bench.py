@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 from pathlib import Path
+from time import monotonic
 import re
 from urllib.parse import quote
 
@@ -23,7 +24,8 @@ def save(path, value):
 
 
 class Corpus:
-    def __init__(self, process):
+    def __init__(self, process, services):
+        self.services = services
         self.process = process
         self.lock = asyncio.Lock()
         self.returned, self.opened = set(), set()
@@ -39,8 +41,10 @@ class Corpus:
             return json.loads(line)
 
     async def search(self, query):
+        self.services.meter.record(search_calls=1)
         self.counts["search"] += 1
         hits = await self.rpc({"search": query})
+        self.services.meter.record(bm25_searches=1)
         self.returned.update(h["id"] for h in hits)
         return [{**h, "url": "https://browsecomp-plus.invalid/doc/" + h["id"]} for h in hits]
 
@@ -48,7 +52,9 @@ class Corpus:
         identifier = hit["id"]
         if identifier not in self.returned:
             raise ValueError("Select a retrieved corpus document")
+        self.services.meter.record(page_reads=1)
         result = await self.rpc({"open": identifier})
+        self.services.meter.record(bm25_reads=1)
         self.opened.add(identifier)
         self.counts["read"] += 1
         return result
@@ -66,7 +72,7 @@ async def retrieval(index, services, folder):
         proc = await asyncio.create_subprocess_exec("java", "-cp", str(jar), str(Path(__file__).with_name("Corpus.java")),
             str(index/"bm25"), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=errors, limit=128*1024*1024)
         try:
-            yield Corpus(proc)
+            yield Corpus(proc, services)
         finally:
             proc.stdin.close()
             try:
@@ -105,6 +111,7 @@ async def run(args, rows):
         for case in rows:
             folder = args.out / str(case["id"])
             folder.mkdir(parents=True, exist_ok=False)
+            started = monotonic()
             svc = Services(client, fallback=False)
             view, work = new_view(), new_work()
             request = {"inputs":case.get("prompt") or case["question"], "lang":case.get("language") or "en",
@@ -118,11 +125,23 @@ async def run(args, rows):
                 work["sources"] = json.loads(saved)
                 meta["evidence_replay_sha256"] = hashlib.sha256(saved).hexdigest()
                 meta["retrieval"] = "saved-evidence"
-            save(folder / "run.json", meta)
+            def save_progress():
+                meta["elapsed_seconds"] = round(monotonic() - started, 3)
+                meta["usage"] = dict(svc.usage)
+                meta["usage_breakdown"] = svc.meter.rows
+                save(folder / "run.json", meta)
+
+            save_progress()
+            last_checkpoint = started
             with (folder / "events.jsonl").open("w", encoding="utf-8") as events:
                 async def emit(kind, data, task):
+                    nonlocal last_checkpoint
                     events.write(json.dumps(dict(type=kind, schema_version=2, task_id=task, data=data), ensure_ascii=False)+"\n")
                     events.flush()
+                    now = monotonic()
+                    if now - last_checkpoint >= 10:
+                        save_progress()
+                        last_checkpoint = now
                 try:
                     async with retrieval(args.index, svc, folder) as search:
                         await Investigation(request, view, work, svc, search, emit).run(write_only=bool(args.replay_evidence))
@@ -131,6 +150,9 @@ async def run(args, rows):
                         if args.suite == "deepresearch-bench":
                             (folder/"submission.jsonl").write_text(json.dumps(pred,ensure_ascii=False)+"\n",encoding="utf-8")
                         meta["status"] = "completed"
+                except asyncio.CancelledError:
+                    meta["status"] = "cancelled"
+                    raise
                 except Exception as error:
                     meta.update(status="failed", error=str(error))
                     failed = True
@@ -139,8 +161,7 @@ async def run(args, rows):
                     save(folder/"evidence.json", work["sources"])
                     if request["timeline"]:
                         save(folder/"timeline.json", view.get("timeline", []))
-                    meta["usage"] = dict(svc.usage)
-                    save(folder/"run.json", meta)
+                    save_progress()
                     print(f"{args.suite}/{case['id']} {meta['status']}", flush=True)
     return failed
 

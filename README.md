@@ -23,7 +23,8 @@ uv run --locked atlas-serve --env-file .env --frontend-dist web/dist
 
 ## 调查过程
 
-- 调度器根据当前证据选择下一批搜索。不同分支可以共用读过的原文。连续两轮没有新增可验证的原文片段时收束检索。常规流程没有应用层 token 总额或固定轮数。上游模型仍有自身的上下文和输出边界。长网页会分段阅读。
+- 调度器分派研究问题和起始搜索词。每个调查员独立选择下一步，可以带着自己的问题阅读原文、根据新线索换词搜索、带着不同问题重读同一篇文献，或交回结论和仍待查证的部分。各分支独立推进，已核实的原文可以即时提示其他调查员。调查员能顺着提示直接读原文，同一网址共享原文读取，各自核对证据。点开线索图的分支可以查看追查过程和收束原因。
+- 正常调查由模型判断何时收手。重复执行无效动作、证据状态又没有变化时，内核交回该分支已核实的发现。中断后继续会恢复分支的问题、已读内容索引、检索历史和待执行动作。常规流程没有应用层 token 总额或固定轮数。上游模型仍有自身的上下文和输出边界。长网页会分段阅读。
 - 交互调查优先使用 DeepSeek Search 与 Fetch。提供 `TAVILY_API_KEY` 后，遇到相应的临时服务错误可回退。联网评测固定 DeepSeek，以便记录和比较搜索条件。
 - 读者模型为每条发现返回原文片段。内核在实际读到的页面里匹配这段文字，并为来源分配引用编号。报告逐节生成并保留草稿，可下载 Markdown。表格、带数据的图表和有来源的图片可在工作台中展示。
 - 可按需打开时间线。界面把相近进展归入时段，区分事件发生、公告、计划和来源发表。缺少事件日期时，有依据的来源日期会标为发表日期或“截至此日已有记录”。缺乏日期依据的材料仍保存在证据中。
@@ -51,8 +52,35 @@ uv run atlas-bench deepresearch-bench --queries /path/to/query.jsonl --id 31 --e
 uv run atlas-score deepresearch-bench results/reports --repo /path/to/DeepResearchBench --judge both --plan --out results/report-submission
 ```
 
+本项目的 BrowseComp-Plus 开发对照沿用每次返回 12 条、可打开全文的配置。官方主实验每次返回前 5 条，并对检索上下文另设限制。跨项目引用分数时应同时标明检索设置。[官方评测说明](https://github.com/texttron/BrowseComp-Plus#evaluating-with-browsing-tools)
+
+BrowseComp-Plus 官方答案裁判读取 `atlas-score browsecomp-plus` 导出的目录。`status` 来自该题的运行记录，证据召回另存为输出目录旁的 `*-recall.json`。在已按官方要求准备好裁判环境和参考数据的 BrowseComp-Plus 仓库内运行以下命令。[官方评分入口](https://github.com/texttron/BrowseComp-Plus#-evaluation)
+
+```sh
+python scripts_evaluation/evaluate_run.py --input_dir /absolute/path/to/results/browse-submission
+```
+
+### 如何读用量结果
+
+每道题的 `run.json` 中，`usage` 是整题总量，`usage_breakdown` 按主控和分支 ID 分组。每个分支保存自己的问题和 `total`，组内的 `operations` 继续区分选下一步、检索、抓取原文、提取证据等操作。工作台的 `GET /api/research/{id}` 在 `view` 中提供同样的字段，继续调查时累计到原记录。评测运行中会随进度事件约每 10 秒保存一次用量快照，结束或手动中断时再保存一次。升级前已有的总量放在 `prior_unattributed`。
+
+- `prompt_tokens`、`completion_tokens` 和 `total_tokens` 来自模型响应。供应方遗漏用量且无法由输入输出相加时计入 `unreported_usage_calls`。模型续写与格式修复都计入发起它们的操作。
+- `model_calls` 统计收到响应的模型调用，`http_attempts` 和 `http_retries` 包括底层网络请求。固定索引的 `bm25_searches` 和 `bm25_reads` 分别统计成功的索引检索和打开文档。同一页并发读取时，发起抓取的一方承担一次原文读取，各分支独立解读原文的 token 分别计算。
+- 比较版本时可重复传入 `--id`，固定问题、语料、模型和检索配置，给每个版本使用新输出目录。`run.json` 保存题目清单与内核指纹、每题耗时和用量，`prediction.json` 保存答案，`events.jsonl` 可回看轨迹。题目清单可与评分文件分开保管。比较时一起报告答对率、检出和打开相关文档的召回率、失败题数和 token。
+
+批次有中止题时，评分入口会指出缺少预测的题号。可将某个已完成题的目录（例如 `results/browse/772`）传给 `atlas-score` 单独评分，并在整批汇总中保留中止题的状态和已消耗用量。
+
+若本机有 jq，可以直接阅读某道题的分项。以下示例按 token 从高到低显示操作，列出分支问题、操作名、总 token、搜索和原文读取次数。
+
+```sh
+jq -r '[.usage_breakdown | to_entries[] | (.value.question // .key) as $who
+  | .value.operations | to_entries[] | [$who, .key, (.value.total_tokens // 0),
+    (.value.search_calls // 0), (.value.page_reads // 0)]]
+  | sort_by(.[2]) | reverse[] | @tsv' results/browse/772/run.json
+```
+
 Open-TLS 可用 `--replay-evidence /path/to/previous/case/evidence.json` 在同一题、同一批已读材料上复测时间线整理。BrowseComp-Plus 需要 Java 21、`anserini-1.2.0-fatjar.jar` 及同目录的官方 `bm25/`。要实际执行 RACE/FACT，在最后一条命令中移除 `--plan`，通过 `--judge-python` 提供已安装官方依赖的解释器，通过 `--judge-env-file` 提供本地 OpenAI 或 OpenRouter 裁判凭据，FACT 另需 Jina 凭据。
 
 ## 项目结构
 
-`atlas_kernel/research.py` 负责任务编排、取证和写作，`providers.py` 连接模型及检索服务，`evidence.py` 处理证据与时间线。`server.py` 和 `storage.py` 提供工作台协议及持久化。`bench.py` 与 `scoring.py` 分别负责生成和评分。`web/` 包含工作台、会话适配层及前端构建入口。
+`atlas_kernel/research.py` 负责任务编排、取证和写作，`branch.py` 负责各调查员的工具循环、证据记录和断点恢复，`providers.py` 连接模型及检索服务，`evidence.py` 处理证据与时间线。`server.py` 和 `storage.py` 提供工作台协议及持久化。`bench.py` 与 `scoring.py` 分别负责生成和评分。`web/` 包含工作台、会话适配层及前端构建入口。

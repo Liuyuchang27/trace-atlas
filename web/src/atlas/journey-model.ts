@@ -4,7 +4,7 @@ import type { MessageKey, Translate } from './i18n';
 
 const stageLabels: Record<string, MessageKey> = {
   connecting: '連接研究引擎', initializing: '理解研究範圍', planning: '規劃調查方向',
-  searching: '檢索資料', filtering: '篩選來源', reading: '閱讀原文', updating_graph: '核對並匯合證據',
+  searching: '檢索資料', filtering: '篩選來源', branch_review: '評估下一步', reading: '閱讀原文', updating_graph: '核對並匯合證據',
   planning_outline: '整理報告大綱', planning_sections: '整理各節證據', writing_section: '撰寫報告',
   writing_summary: '撰寫摘要', finalizing: '核對引用', building_timeline: '整理事件日期', grouping_timeline: '歸納關鍵時段',
 };
